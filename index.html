@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#f5f5f7">
-<title>のぶ帳簿 v17 買い物日付強化版</title>
+<title>のぶ帳簿 v18 買い物合計精密版</title>
 <style>
 :root{font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif;color:#111;background:#f5f5f7}
 *{box-sizing:border-box}
@@ -30,7 +30,7 @@ footer{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(
 </style>
 </head>
 <body>
-<header><h1>のぶ帳簿 <span class="ver">v17・買い物日付強化版</span></h1></header>
+<header><h1>のぶ帳簿 <span class="ver">v18・買い物合計精密版</span></h1></header>
 
 <div class="card">
   <span id="selftest" class="badge">内部テスト中…</span><span class="badge" style="margin-left:6px">PaddleOCR不使用</span>
@@ -53,7 +53,7 @@ footer{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(
   <p class="small"><b>買い物レシートは、店名・日付・合計金額が全部入るようにレシート全体を撮影してください。</b></p>
   <img id="preview" class="hidden" alt="preview">
   <button id="ocrBtn" class="primary" style="width:100%;margin-top:10px" disabled>OCRして自動入力</button>
-  <div id="status" class="status" style="margin-top:10px">v17安定版を読み込みました。レシート全体を撮影してください。</div>
+  <div id="status" class="status" style="margin-top:10px">v18安定版を読み込みました。レシート全体を撮影してください。</div>
 </div>
 
 <div id="form-medical" class="card">
@@ -181,32 +181,67 @@ function reiwaToISO(y,m,d){
   if(!yy||!m||!d)return "";
   return `${yy}-${String(m).padStart(2,"0")}-${String(d).padStart(2,"0")}`;
 }
+function validYMD(y,m,d){
+  y=Number(y);m=Number(m);d=Number(d);
+  if(y<2000||y>2099||m<1||m>12||d<1||d>31)return "";
+  const dt=new Date(y,m-1,d);
+  if(dt.getFullYear()!==y||dt.getMonth()!==m-1||dt.getDate()!==d)return "";
+  return `${y}-${String(m).padStart(2,"0")}-${String(d).padStart(2,"0")}`;
+}
+function inferYearForMonthDay(m,d){
+  const now=new Date();
+  let y=now.getFullYear();
+  let dt=new Date(y,Number(m)-1,Number(d));
+  // If the inferred date is more than ~45 days in the future, it is probably last year.
+  const futureDays=(dt-now)/(1000*60*60*24);
+  if(futureDays>45)y--;
+  return validYMD(y,m,d);
+}
 function parseDate(text){
   let s=normalize(text)
-    .replace(/\s+/g," ")
-    .replace(/[―ーｰ]/g,"-");
+    .replace(/[―ーｰ]/g,"-")
+    .replace(/[年月]/g,m=>m)
+    .replace(/\s+/g," ");
 
-  // Reiwa: 令和8年8月12日 / 令和 8 年 8 月 12 日
-  let m=s.match(/令和\s*([0-9]{1,2})\s*年\s*([0-9]{1,2})\s*月\s*([0-9]{1,2})\s*日/);
+  let m;
+
+  // Reiwa full form
+  m=s.match(/令和\s*([0-9]{1,2})\s*年\s*([0-9]{1,2})\s*月\s*([0-9]{1,2})\s*日/);
   if(m)return reiwaToISO(m[1],m[2],m[3]);
 
-  // Abbreviated Reiwa: R8/8/12, R8.8.12, R 8-8-12
+  // R8/8/12 etc.
   m=s.match(/\bR\s*([0-9]{1,2})\s*[\/.\-]\s*([0-9]{1,2})\s*[\/.\-]\s*([0-9]{1,2})\b/i);
   if(m)return reiwaToISO(m[1],m[2],m[3]);
 
-  // Western dates
-  m=s.match(/\b(20[0-9]{2})\s*[\/.\-年]\s*([0-9]{1,2})\s*[\/.\-月]\s*([0-9]{1,2})\s*(?:日)?\b/);
-  if(m)return `${m[1]}-${String(m[2]).padStart(2,"0")}-${String(m[3]).padStart(2,"0")}`;
+  // YYYY/MM/DD, YYYY-MM-DD, YYYY.MM.DD
+  m=s.match(/\b(20[0-9]{2})\s*[\/.\-]\s*([0-9]{1,2})\s*[\/.\-]\s*([0-9]{1,2})\b/);
+  if(m)return validYMD(m[1],m[2],m[3]);
 
-  // OCR sometimes drops 元号 text but keeps a Japanese style date around the issue-date label.
-  // Only accept 1–20 as a likely Reiwa year and only when nearby text says 発行年月日/診療日/領収日.
-  const lines=String(text||"").split(/\n+/).map(x=>normalize(x));
-  for(let i=0;i<lines.length;i++){
-    const scope=[lines[i-1]||"",lines[i],lines[i+1]||""].join(" ");
-    if(!/(発行年月日|発行日|診療日|領収日|年月日)/.test(scope)) continue;
-    const x=scope.match(/(?:令和\s*)?([1-9]|1[0-9]|20)\s*年\s*([0-9]{1,2})\s*月\s*([0-9]{1,2})\s*日/);
-    if(x)return reiwaToISO(x[1],x[2],x[3]);
+  // YYYY年M月D日
+  m=s.match(/\b(20[0-9]{2})\s*年\s*([0-9]{1,2})\s*月\s*([0-9]{1,2})\s*日/);
+  if(m)return validYMD(m[1],m[2],m[3]);
+
+  // Japanese two-digit year such as 26/08/25 (2026)
+  m=s.match(/(?:^|[^\d])([2-9][0-9])\s*[\/.\-]\s*([0-9]{1,2})\s*[\/.\-]\s*([0-9]{1,2})(?:[^\d]|$)/);
+  if(m){
+    const y=2000+Number(m[1]);
+    return validYMD(y,m[2],m[3]);
   }
+
+  // M月D日 with no year.
+  m=s.match(/(?:^|[^\d])([0-9]{1,2})\s*月\s*([0-9]{1,2})\s*日/);
+  if(m)return inferYearForMonthDay(m[1],m[2]);
+
+  // M/D or M-D with no year. Avoid times/prices by requiring valid calendar date.
+  const md=[...s.matchAll(/(?:^|[^\d])([0-9]{1,2})\s*[\/\-]\s*([0-9]{1,2})(?:[^\d]|$)/g)];
+  for(const x of md){
+    const mm=Number(x[1]),dd=Number(x[2]);
+    if(mm>=1&&mm<=12&&dd>=1&&dd<=31){
+      const inferred=inferYearForMonthDay(mm,dd);
+      if(inferred)return inferred;
+    }
+  }
+
   return "";
 }
 function excludedAmountLine(s){
@@ -589,20 +624,112 @@ function safeShoppingStoreName(text){
 function safeShoppingAmount(text){
   const lines=String(text||"").split(/\n+/).map(x=>normalize(x.trim())).filter(Boolean);
   const c=[];
+
+  const exclude=/(お釣|釣銭|つり|預り|お預り|ポイント|登録番号|電話|TEL|No\.?|番号|内消費税|消費税|税率|対象額|値引|割引)/i;
+  const strongest=/(^|\s)(合計|総合計|お買上合計|お買い上げ合計|お支払額|お支払い額|支払額|現計|総額|TOTAL)(\s|$|[:：])/i;
+  const strongLoose=/(合計|TOTAL|総額|現計|お支払|支払額)/i;
+
+  // OCR often puts the label and the number on adjacent lines.
   for(let i=0;i<lines.length;i++){
-    const s=lines[i];
-    if(/お釣|釣銭|預り|ポイント|点|電話|TEL|No\.?|番号/.test(s)) continue;
-    const strong=/(合計|お買上|お買い上げ|お支払|支払額|現計|総額|TOTAL)/i.test(s);
-    for(const n of amountsInLine(s)){
-      let score=strong?220:0;
-      if(/円/.test(s))score+=60;
-      if(n>=50)score+=20;
-      if(n<10)score-=200;
-      c.push({n,score});
+    const line=lines[i];
+    if(exclude.test(line))continue;
+
+    const isStrong=strongest.test(line)||strongLoose.test(line);
+    if(!isStrong)continue;
+
+    for(let j=i;j<=Math.min(lines.length-1,i+2);j++){
+      const target=lines[j];
+      if(exclude.test(target))continue;
+
+      for(const n of amountsInLine(target)){
+        if(n<10)continue;
+        let score=320;
+        if(j===i)score+=140;
+        if(/[円¥￥]/.test(target))score+=80;
+        if(n>=100)score+=20;
+        if(n%10===0)score+=3;
+        c.push({n,score,line:target,source:line});
+      }
     }
   }
-  c.sort((a,b)=>b.score-a.score||b.n-a.n);
-  return c[0]?.score>=80?c[0].n:"";
+
+  // If OCR split "合計" and ¥5,126 into different lines, inspect ±2 lines around each total label.
+  for(let i=0;i<lines.length;i++){
+    if(!strongLoose.test(lines[i]))continue;
+    for(let j=Math.max(0,i-2);j<=Math.min(lines.length-1,i+2);j++){
+      const target=lines[j];
+      if(exclude.test(target))continue;
+      for(const n of amountsInLine(target)){
+        if(n<10)continue;
+        let score=240-Math.abs(i-j)*25;
+        if(/[円¥￥]/.test(target))score+=80;
+        if(n>=100)score+=20;
+        c.push({n,score,line:target,source:lines[i]});
+      }
+    }
+  }
+
+  // General currency fallback, but never let cash/change/tax beat a total.
+  for(const line of lines){
+    if(exclude.test(line))continue;
+    for(const n of amountsInLine(line)){
+      if(n<10)continue;
+      let score=0;
+      if(/[円¥￥]/.test(line))score+=80;
+      if(n>=100)score+=20;
+      if(strongLoose.test(line))score+=220;
+      c.push({n,score,line,source:"fallback"});
+    }
+  }
+
+  c.sort((a,b)=>b.score-a.score || b.n-a.n);
+  return c[0]?.score>=120 ? c[0].n : "";
+}
+
+
+async function precisionShoppingAmount(file){
+  // Search common total areas at high magnification. We keep labels, not just digits,
+  // because "合計/TOTAL" is the strongest evidence.
+  const angles=[0,90,-90];
+  const zones=[
+    [0.00,0.35,1.00,0.82],
+    [0.00,0.20,1.00,0.95],
+    [0.00,0.00,1.00,1.00]
+  ];
+
+  await restoreTextOCR();
+  const w=await ensureWorker();
+  let best={amount:"",score:0,text:""};
+
+  for(const angle of angles){
+    const oriented=await makeCanvas(file,"full",angle);
+    for(let zi=0;zi<zones.length;zi++){
+      setStatus(`合計金額を精密OCR中… ${angle}° ${zi+1}/${zones.length}`);
+      const z=zones[zi];
+      const part=cropCanvas(oriented,z[0],z[1],z[2],z[3], zi===2 ? 1.15 : 1.8);
+
+      await w.setParameters({
+        tessedit_char_whitelist:"",
+        tessedit_pageseg_mode: zi===2 ? Tesseract.PSM.AUTO : Tesseract.PSM.SPARSE_TEXT,
+        preserve_interword_spaces:"1"
+      });
+
+      const r=await w.recognize(part,{rotateAuto:false});
+      const raw=r.data.text||"";
+      const amount=safeShoppingAmount(raw);
+
+      if(amount){
+        // Score by whether OCR actually saw a total label near the candidate.
+        let score=100;
+        if(/合計|TOTAL|総額|現計|お支払|支払額/i.test(raw))score+=200;
+        if(new RegExp(String(amount).split("").join("[,，\\s]*")).test(normalize(raw)))score+=50;
+        if(score>best.score)best={amount,score,text:raw,angle};
+      }
+    }
+  }
+
+  await restoreTextOCR();
+  return best.amount ? best : null;
 }
 
 async function precisionShoppingDate(file){
@@ -688,12 +815,23 @@ $("ocrBtn").onclick=async()=>{
     }else{
       applyParsed(combined);
 
-      if(currentTab==="shopping" && !$("s-date").value){
-        const pd=await precisionShoppingDate(currentFile);
-        if(pd){
-          combined += "\n--- 購入日精密OCR ---\n"+pd.text;
+      if(currentTab==="shopping"){
+        // Always try a dedicated total scan and override the generic amount when
+        // a total label is found. This prevents item prices from being stored as total.
+        const pa=await precisionShoppingAmount(currentFile);
+        if(pa){
+          combined += "\n--- 合計金額精密OCR ---\n"+pa.text;
           $("raw").value=combined;
-          $("s-date").value=pd.date;
+          $("s-amount").value=pa.amount;
+        }
+
+        if(!$("s-date").value){
+          const pd=await precisionShoppingDate(currentFile);
+          if(pd){
+            combined += "\n--- 購入日精密OCR ---\n"+pd.text;
+            $("raw").value=combined;
+            $("s-date").value=pd.date;
+          }
         }
       }
 
@@ -795,12 +933,21 @@ function runSelfTest(){
   const ok4=parseMedicalAmount(clipped)==="";
   const ok5=parseDate("発行年月日 R8/8/12")==="2026-08-12";
   const ok6=parseDate("発行年月日 令和 8 年 8 月 12 日")==="2026-08-12";
+  const shopSample=`商品A 1738円
+商品B 1738円
+合計 3点
+¥5,126
+現金お預り ¥10,000
+お釣り ¥4,874
+2026/08/25 20:14`;
+  const ok7=safeShoppingAmount(shopSample)===5126;
+  const ok8=parseDate(shopSample)==="2026-08-25";
 
   currentTab=oldTab;
 
-  const ok=ok1&&ok2&&ok3&&ok4&&ok5&&ok6;
+  const ok=ok1&&ok2&&ok3&&ok4&&ok5&&ok6&&ok7&&ok8;
   const el=$("selftest");
-  el.textContent=ok?"内部抽出テスト：OK（医療費＋買い物日付）":"内部抽出テスト：要修正";
+  el.textContent=ok?"内部抽出テスト：OK（医療費＋買い物合計＋日付）":"内部抽出テスト：要修正";
   if(!ok)el.style.background="#ffecec";
   return ok;
 }
