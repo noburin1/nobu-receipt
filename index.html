@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#f5f5f7">
-<title>のぶ帳簿 v26 会計式最優先版</title>
+<title>のぶ帳簿 v27 確定申告対応版</title>
 <style>
 :root{font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif;color:#111;background:#f5f5f7}
 *{box-sizing:border-box}
@@ -30,7 +30,7 @@ footer{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(
 </style>
 </head>
 <body>
-<header><h1>のぶ帳簿 <span class="ver">v26・会計式最優先版</span></h1></header>
+<header><h1>のぶ帳簿 <span class="ver">v27・確定申告対応版</span></h1></header>
 
 <div class="card">
   <span id="selftest" class="badge">内部テスト中…</span><span class="badge" style="margin-left:6px">PaddleOCR不使用</span><span class="badge" style="margin-left:6px">店名学習ON</span>
@@ -53,14 +53,24 @@ footer{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(
   <p class="small"><b>買い物レシートは、店名・日付・合計金額が全部入るようにレシート全体を撮影してください。</b></p>
   <img id="preview" class="hidden" alt="preview">
   <button id="ocrBtn" class="primary" style="width:100%;margin-top:10px" disabled>OCRして自動入力</button>
-  <div id="status" class="status" style="margin-top:10px">v26安定版を読み込みました。預り−お釣りの会計式を最優先します。</div>
+  <div id="status" class="status" style="margin-top:10px">v27確定申告対応版を読み込みました。</div>
 </div>
 
 <div id="form-medical" class="card">
   <h2>医療費</h2>
-  <label>医療機関名</label><input id="m-name" placeholder="例：○○歯科">
+  <label>医療を受けた方</label><input id="m-patient" placeholder="例：本人">
+  <label>病院・薬局などの支払先</label><input id="m-name" placeholder="例：○○歯科">
   <label>日付</label><input id="m-date" type="date">
+  <label>医療費の区分</label>
+  <select id="m-category">
+    <option value="診療・治療">診療・治療</option>
+    <option value="医薬品購入">医薬品購入</option>
+    <option value="介護保険サービス">介護保険サービス</option>
+    <option value="その他の医療費">その他の医療費</option>
+  </select>
   <label>支払額（円）</label><input id="m-amount" inputmode="numeric" placeholder="例：370">
+  <label>保険金・高額療養費などで補てんされる額（円）</label>
+  <input id="m-reimb" inputmode="numeric" value="0">
   <button id="saveMedical" class="primary" style="width:100%;margin-top:12px">医療費として保存</button>
 </div>
 
@@ -86,6 +96,28 @@ footer{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(
     <div><div class="small">今月の買い物</div><div id="shoppingTotal" class="total">0円</div></div>
     <div><div class="small">今年の医療費</div><div id="medicalTotal" class="total">0円</div></div>
   </div>
+</div>
+
+<div class="card">
+  <h2>確定申告用 医療費集計</h2>
+  <div class="grid2">
+    <div><label>対象年</label><select id="taxYear"></select></div>
+    <div><label>総所得金額等（任意・控除額概算用）</label><input id="taxIncome" inputmode="numeric" placeholder="例：3000000"></div>
+  </div>
+  <div class="grid2" style="margin-top:10px">
+    <div><div class="small">支払医療費</div><div id="taxMedicalPaid" class="total">0円</div></div>
+    <div><div class="small">補てん額</div><div id="taxMedicalReimb" class="total">0円</div></div>
+  </div>
+  <div class="grid2" style="margin-top:10px">
+    <div><div class="small">差引医療費</div><div id="taxMedicalNet" class="total">0円</div></div>
+    <div><div class="small">医療費控除額（概算）</div><div id="taxMedicalDeduction" class="total">―</div></div>
+  </div>
+  <p id="taxCalcNote" class="small">総所得金額等を入力すると控除額を概算します。</p>
+  <div class="grid2">
+    <button id="medicalTaxCsvBtn">医療費・確定申告CSV</button>
+    <button id="withholdingCsvBtn">源泉徴収票CSV</button>
+  </div>
+  <p class="small">※ CSVは整理・転記用です。国税庁の「医療費集計フォーム」そのものではありません。</p>
 </div>
 
 <div class="card">
@@ -1521,7 +1553,16 @@ function add(type,obj){
   saveDB();
   setStatus("保存しました。","ok");
 }
-$("saveMedical").onclick=()=>add("medical",{name:$("m-name").value.trim(),date:$("m-date").value,amount:Number($("m-amount").value||0),ocr:$("raw").value});
+$("saveMedical").onclick=()=>{
+  const patient=$("m-patient").value.trim()||"本人";
+  const name=$("m-name").value.trim();
+  const date=$("m-date").value;
+  const category=$("m-category").value;
+  const amount=Number($("m-amount").value||0);
+  const reimbursement=Math.max(0,Number($("m-reimb").value||0));
+  if(!name||!date||!amount){setStatus("医療費は、支払先・日付・支払額を確認してから保存してください。","err");return;}
+  add("medical",{patient,name,date,category,amount,reimbursement,ocr:$("raw").value});
+};
 $("saveShopping").onclick=()=>{
   const name=$("s-name").value.trim();
   const date=$("s-date").value;
@@ -1551,17 +1592,89 @@ $("saveShopping").onclick=()=>{
 $("saveTax").onclick=()=>add("tax",{name:$("t-name").value.trim(),year:$("t-year").value,payment:Number($("t-payment").value||0),tax:Number($("t-tax").value||0),ocr:$("raw").value});
 $("filter").onchange=render;
 
+
+function availableTaxYears(){
+  const years=new Set([String(new Date().getFullYear())]);
+  for(const x of db){
+    if(x.type==="medical"&&x.date&&/^\d{4}/.test(x.date))years.add(x.date.slice(0,4));
+    if(x.type==="tax"&&x.year)years.add(String(x.year));
+  }
+  return [...years].sort((a,b)=>Number(b)-Number(a));
+}
+function refreshTaxYearOptions(){
+  const el=$("taxYear"); if(!el)return;
+  const cur=el.value, years=availableTaxYears();
+  el.innerHTML=years.map(y=>`<option value="${y}">${y}年分</option>`).join("");
+  if(years.includes(cur))el.value=cur;
+}
+function taxMedicalSummary(year){
+  const rows=db.filter(x=>x.type==="medical"&&String(x.date||"").startsWith(String(year)));
+  const paid=rows.reduce((s,x)=>s+(Number(x.amount)||0),0);
+  const reimbursement=rows.reduce((s,x)=>s+Math.min(Number(x.reimbursement)||0,Number(x.amount)||0),0);
+  return {rows,paid,reimbursement,net:Math.max(0,paid-reimbursement)};
+}
+function updateTaxSummary(){
+  if(!$("taxYear"))return;
+  refreshTaxYearOptions();
+  const year=$("taxYear").value||String(new Date().getFullYear());
+  const s=taxMedicalSummary(year);
+  $("taxMedicalPaid").textContent=yen(s.paid);
+  $("taxMedicalReimb").textContent=yen(s.reimbursement);
+  $("taxMedicalNet").textContent=yen(s.net);
+  const income=Number($("taxIncome").value||0);
+  if(income>0){
+    const threshold=income<2000000?income*0.05:100000;
+    const deduction=Math.min(2000000,Math.max(0,s.net-threshold));
+    $("taxMedicalDeduction").textContent=yen(Math.floor(deduction));
+    $("taxCalcNote").textContent=`差引基準：${yen(Math.floor(threshold))}。申告前に国税庁画面で確認してください。`;
+  }else{
+    $("taxMedicalDeduction").textContent="―";
+    $("taxCalcNote").textContent="総所得金額等を入力すると控除額を概算します。";
+  }
+}
+function downloadCsv(filename,rows){
+  const csv="\uFEFF"+rows.map(r=>r.map(v=>`"${String(v??"").replace(/"/g,'""')}"`).join(",")).join("\r\n");
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv;charset=utf-8"}));
+  a.download=filename;a.click();
+}
+function exportMedicalTaxCsv(){
+  const year=$("taxYear").value||String(new Date().getFullYear()), s=taxMedicalSummary(year);
+  const grouped=new Map();
+  for(const x of s.rows){
+    const patient=x.patient||"本人", provider=x.name||"", category=x.category||"診療・治療";
+    const key=[patient,provider,category].join("||");
+    if(!grouped.has(key))grouped.set(key,{patient,provider,category,amount:0,reimbursement:0,dates:[]});
+    const g=grouped.get(key);
+    g.amount+=Number(x.amount)||0;
+    g.reimbursement+=Math.min(Number(x.reimbursement)||0,Number(x.amount)||0);
+    if(x.date)g.dates.push(x.date);
+  }
+  const rows=[["年分","医療を受けた方の氏名","病院・薬局などの支払先の名称","医療費の区分","支払った医療費の額","保険金・高額療養費等で補てんされる金額","記録日"]];
+  for(const g of grouped.values())rows.push([year,g.patient,g.provider,g.category,g.amount,g.reimbursement,[...new Set(g.dates)].sort().join(" / ")]);
+  rows.push(["","","","合計",s.paid,s.reimbursement,""]);
+  downloadCsv(`nobu-medical-tax-${year}.csv`,rows);
+}
+function exportWithholdingCsv(){
+  const year=$("taxYear").value||String(new Date().getFullYear());
+  const rows=[["年分","支払者名","支払金額","源泉徴収税額"]];
+  db.filter(x=>x.type==="tax"&&String(x.year||"")===year).forEach(x=>rows.push([year,x.name||"",Number(x.payment)||0,Number(x.tax)||0]));
+  downloadCsv(`nobu-withholding-${year}.csv`,rows);
+}
+
 function render(){
   const now=new Date(),ym=`${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,"0")}`,y=String(now.getFullYear());
   const st=db.filter(x=>x.type==="shopping"&&String(x.date||"").startsWith(ym)).reduce((s,x)=>s+(+x.amount||0),0);
   const mt=db.filter(x=>x.type==="medical"&&String(x.date||"").startsWith(y)).reduce((s,x)=>s+(+x.amount||0),0);
   $("shoppingTotal").textContent=yen(st);$("medicalTotal").textContent=yen(mt);
+  updateTaxSummary();
   const f=$("filter").value,arr=db.filter(x=>f==="all"||x.type===f);
   $("history").innerHTML=arr.length?arr.map(x=>{
     const title=x.type==="medical"?"医療費":x.type==="shopping"?"買い物":"源泉徴収票";
     const val=x.type==="tax"?`支払 ${yen(x.payment)} / 税 ${yen(x.tax)}`:yen(x.amount);
     const when=x.date||x.year||"";
-    return `<div class="history-item"><b>${title}</b>　${escapeHtml(x.name||"")}<br><span class="small">${escapeHtml(when)} / ${val}</span><br><button class="danger" onclick="del(${x.id})">削除</button></div>`;
+    const extra=x.type==="medical"?` / ${escapeHtml(x.patient||"本人")} / ${escapeHtml(x.category||"診療・治療")}${Number(x.reimbursement||0)?` / 補てん ${yen(x.reimbursement)}`:""}`:"";
+    return `<div class="history-item"><b>${title}</b>　${escapeHtml(x.name||"")}<br><span class="small">${escapeHtml(when)} / ${val}${extra}</span><br><button class="danger" onclick="del(${x.id})">削除</button></div>`;
   }).join(""):"<p class='small'>まだ記録はありません。</p>";
 }
 function escapeHtml(s){return String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[c]))}
@@ -1662,10 +1775,15 @@ function runSelfTest(){
 
   const ok=ok1&&ok2&&ok3&&ok4&&ok5&&ok6&&ok7&&ok8&&ok9&&ok10&&ok11&&ok12&&ok13&&ok14&&ok15&&ok16&&ok17&&ok18&&ok19&&ok20&&ok21&&ok22&&ok23;
   const el=$("selftest");
-  el.textContent=ok?"内部抽出テスト：OK（店名学習＋会計式最優先）":"内部抽出テスト：要修正";
+  el.textContent=ok?"内部抽出テスト：OK（確定申告対応）":"内部抽出テスト：要修正";
   if(!ok)el.style.background="#ffecec";
   return ok;
 }
+
+$("taxYear").addEventListener("change",updateTaxSummary);
+$("taxIncome").addEventListener("input",updateTaxSummary);
+$("medicalTaxCsvBtn").onclick=exportMedicalTaxCsv;
+$("withholdingCsvBtn").onclick=exportWithholdingCsv;
 
 render();setTab("medical");runSelfTest();
 </script>
