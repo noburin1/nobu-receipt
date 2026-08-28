@@ -1,14 +1,1 @@
-const CACHE="nobu-receipt-v1";
-self.addEventListener("install",e=>{
-  e.waitUntil(caches.open(CACHE).then(c=>c.addAll(["./","./index.html","./manifest.webmanifest"])));
-});
-self.addEventListener("fetch",e=>{
-  if(e.request.url.includes("cdn.jsdelivr.net")) return;
-  e.respondWith(
-    caches.match(e.request).then(r=>r||fetch(e.request).then(x=>{
-      const c=x.clone();
-      caches.open(CACHE).then(k=>k.put(e.request,c));
-      return x;
-    }).catch(()=>caches.match("./index.html")))
-  );
-});
+const CACHE="nobu-receipt-v2-20260828";const CORE=["./","./index.html","./manifest.webmanifest"];self.addEventListener("install",e=>e.waitUntil(caches.open(CACHE).then(c=>c.addAll(CORE)).then(()=>self.skipWaiting())));self.addEventListener("activate",e=>e.waitUntil(caches.keys().then(k=>Promise.all(k.filter(x=>x!==CACHE).map(x=>caches.delete(x)))).then(()=>self.clients.claim())));self.addEventListener("fetch",e=>{let u=new URL(e.request.url);if(u.hostname==="cdn.jsdelivr.net")return;if(e.request.mode==="navigate"){e.respondWith(fetch(e.request).then(r=>{let c=r.clone();caches.open(CACHE).then(k=>k.put("./index.html",c));return r}).catch(()=>caches.match("./index.html")));return}e.respondWith(caches.match(e.request).then(r=>r||fetch(e.request)))})

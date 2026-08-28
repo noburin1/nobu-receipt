@@ -1,6 +1,5 @@
-【のぶ帳簿 iPhone PWA v1】
-必ずHTTPSのWebサイトとして公開してSafariで開いてください。
-iPhoneの「ファイル」からindex.htmlを直接開く方式ではありません。
-Safari→共有→ホーム画面に追加→「Webアプリとして開く」をオン→追加。
-撮影→OCR→確認→保存。OCRは初回にインターネットからTesseract.jsと日本語データを読み込みます。
-帳簿データはブラウザのlocalStorageに保存します。OCR結果は保存前に必ず確認してください。
+のぶ帳簿 v2
+日本語レシート・医療領収書向けOCR強化版。
+横向き自動判定、画像補正、令和日付変換、医療機関名抽出、領収額合計優先、保存前確認を追加。
+既存の nobu-receipt リポジトリの index.html / manifest.webmanifest / sw.js / README.txt をこの4ファイルで上書きしてください。
+OCRエンジンの初回読込には通信が必要です。帳簿データはブラウザ内(localStorage)に保存します。
