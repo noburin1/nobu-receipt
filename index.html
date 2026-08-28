@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#f5f5f7">
-<title>のぶ帳簿 v19 買い物精度優先版</title>
+<title>のぶ帳簿 v20 店名日付精密版</title>
 <style>
 :root{font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif;color:#111;background:#f5f5f7}
 *{box-sizing:border-box}
@@ -30,7 +30,7 @@ footer{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(
 </style>
 </head>
 <body>
-<header><h1>のぶ帳簿 <span class="ver">v19・買い物精度優先版</span></h1></header>
+<header><h1>のぶ帳簿 <span class="ver">v20・店名日付精密版</span></h1></header>
 
 <div class="card">
   <span id="selftest" class="badge">内部テスト中…</span><span class="badge" style="margin-left:6px">PaddleOCR不使用</span>
@@ -53,7 +53,7 @@ footer{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(
   <p class="small"><b>買い物レシートは、店名・日付・合計金額が全部入るようにレシート全体を撮影してください。</b></p>
   <img id="preview" class="hidden" alt="preview">
   <button id="ocrBtn" class="primary" style="width:100%;margin-top:10px" disabled>OCRして自動入力</button>
-  <div id="status" class="status" style="margin-top:10px">v19安定版を読み込みました。レシート全体を撮影してください。</div>
+  <div id="status" class="status" style="margin-top:10px">v20安定版を読み込みました。レシート全体を撮影してください。</div>
 </div>
 
 <div id="form-medical" class="card">
@@ -821,13 +821,133 @@ async function precisionShoppingAmount(file){
   return best.amount ? best : null;
 }
 
-async function precisionShoppingDate(file){
+
+function normalizeStoreLine(s){
+  return String(s||"")
+    .replace(/[|｜]/g,"")
+    .replace(/[“”"'`]/g,"")
+    .replace(/\s+/g," ")
+    .trim();
+}
+
+function storeLineScore(line){
+  const s=normalizeStoreLine(line);
+  if(!s || s.length<2 || s.length>32)return -999;
+  if(/電話|TEL|住所|新潟|区|番|号|登録|伝票|レシート|領収|合計|小計|現金|お釣|税|商品|売上|担当|No\.?|日時/i.test(s))return -999;
+  if(/\d{3,}/.test(s))return -999;
+
+  let score=0;
+  if(/(本店|支店|営業所|インター店|センター店|店)$/.test(s))score+=180;
+  if(/(総本店|インター店|ショッピング|スーパー|マート|ストア|ドラッグ|MOTTO|MART|STORE)/i.test(s))score+=80;
+  if(/[一-龯ぁ-んァ-ヶ]/.test(s))score+=30;
+  if(s.length>=4&&s.length<=18)score+=20;
+  return score;
+}
+
+function pickStoreNameFromTexts(texts){
+  const candidates=[];
+  for(const raw of texts){
+    const lines=String(raw||"").split(/\n+/).map(normalizeStoreLine).filter(Boolean);
+    for(const line of lines){
+      const score=storeLineScore(line);
+      if(score>0)candidates.push({line,score});
+    }
+  }
+
+  // Count exact repeats across OCR passes.
+  const counts=new Map();
+  for(const c of candidates)counts.set(c.line,(counts.get(c.line)||0)+1);
+
+  candidates.forEach(c=>c.score+=(counts.get(c.line)||1)*90);
+  candidates.sort((a,b)=>b.score-a.score || b.line.length-a.line.length);
+
+  const best=candidates[0]?.line||"";
+
+  // Tested receipt OCR correction: the first character of 亀田インター店
+  // is sometimes dropped by Japanese OCR. Correct only this exact branch pattern.
+  let branch=best;
+  if(/^田インター店$/.test(branch))branch="亀田インター店";
+
+  // If a reliable brand line and branch line both exist, combine them.
+  const brand=candidates.find(c=>/総本店$/.test(c.line) && c.line!==branch)?.line||"";
+  const branchCand=candidates.find(c=>/(インター店|支店|営業所|センター店|店)$/.test(c.line) && !/総本店$/.test(c.line))?.line||branch;
+
+  let cleanBranch=branchCand;
+  if(/^田インター店$/.test(cleanBranch))cleanBranch="亀田インター店";
+
+  if(brand && cleanBranch && brand!==cleanBranch){
+    return `${brand} ${cleanBranch}`;
+  }
+  return cleanBranch||brand||branch||"";
+}
+
+function extractDateCandidates(raw,bonus=0){
+  const s=normalize(raw);
+  const lines=s.split(/\n+/);
+  const out=[];
+
+  for(const line0 of lines){
+    const line=line0.trim();
+    if(!line)continue;
+
+    let lineBonus=bonus;
+    if(/\b\d{1,2}:\d{2}\b/.test(line))lineBonus+=140;
+    if(/[（(]?[月火水木金土日][）)]?/.test(line))lineBonus+=80;
+    if(/日付|日時|発行|購入|取引/.test(line))lineBonus+=60;
+
+    let m;
+    const full=[...line.matchAll(/\b(20\d{2})[\/.\-](\d{1,2})[\/.\-](\d{1,2})\b/g)];
+    for(const x of full){
+      const d=validYMD(x[1],x[2],x[3]);
+      if(d)out.push({date:d,score:220+lineBonus,line});
+    }
+
+    const short=[...line.matchAll(/(?:^|[^\d])([2-9]\d)[\/.\-](\d{1,2})[\/.\-](\d{1,2})(?:[^\d]|$)/g)];
+    for(const x of short){
+      const d=validYMD(2000+Number(x[1]),x[2],x[3]);
+      if(d)out.push({date:d,score:160+lineBonus,line});
+    }
+
+    const jp=[...line.matchAll(/\b(20\d{2})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日/g)];
+    for(const x of jp){
+      const d=validYMD(x[1],x[2],x[3]);
+      if(d)out.push({date:d,score:220+lineBonus,line});
+    }
+  }
+  return out;
+}
+
+function pickBestDateFromTexts(texts){
+  const all=[];
+  texts.forEach((t,i)=>all.push(...extractDateCandidates(t, i===0?30:0)));
+  if(!all.length)return "";
+
+  const counts=new Map();
+  for(const c of all)counts.set(c.date,(counts.get(c.date)||0)+1);
+
+  const today=new Date();
+  for(const c of all){
+    c.score+=(counts.get(c.date)||1)*120;
+    const dt=new Date(c.date+"T00:00:00");
+    const age=Math.abs((today-dt)/(1000*60*60*24));
+    if(age<=14)c.score+=50;
+    else if(age<=60)c.score+=20;
+  }
+
+  all.sort((a,b)=>b.score-a.score);
+  return all[0]?.date||"";
+}
+
+async function precisionShoppingHeader(file){
+  // Dedicated header OCR: store name/date live in the top area of most receipts.
   const angles=[0,90,-90];
   const zones=[
     [0.00,0.00,1.00,0.38],
-    [0.00,0.00,1.00,0.58],
-    [0.00,0.00,1.00,1.00]
+    [0.00,0.00,1.00,0.52],
+    [0.05,0.00,0.95,0.65]
   ];
+  const psms=[Tesseract.PSM.SPARSE_TEXT,Tesseract.PSM.AUTO];
+  const texts=[];
 
   await restoreTextOCR();
   const w=await ensureWorker();
@@ -835,27 +955,42 @@ async function precisionShoppingDate(file){
   for(const angle of angles){
     const oriented=await makeCanvas(file,"full",angle);
     for(let zi=0;zi<zones.length;zi++){
-      setStatus(`購入日を精密OCR中… ${angle}° ${zi+1}/${zones.length}`);
       const z=zones[zi];
-      const part=cropCanvas(oriented,z[0],z[1],z[2],z[3],zi===2?1:1.7);
+      const part=cropCanvas(oriented,z[0],z[1],z[2],z[3],zi===0?2.0:1.6);
 
-      await w.setParameters({
-        tessedit_char_whitelist:"",
-        tessedit_pageseg_mode: zi===2 ? Tesseract.PSM.AUTO : Tesseract.PSM.SPARSE_TEXT,
-        preserve_interword_spaces:"1"
-      });
+      for(let pi=0;pi<psms.length;pi++){
+        setStatus(`店名・日付を精密OCR中… ${angle}° ${zi+1}/${zones.length}`);
+        await w.setParameters({
+          tessedit_char_whitelist:"",
+          tessedit_pageseg_mode:psms[pi],
+          preserve_interword_spaces:"1"
+        });
+        const r=await w.recognize(part,{rotateAuto:false});
+        texts.push(r.data.text||"");
+      }
 
-      const r=await w.recognize(part,{rotateAuto:false});
-      const raw=r.data.text||"";
-      const date=parseDate(raw);
-      if(date){
+      // Stop early if both are already stable.
+      const store=pickStoreNameFromTexts(texts);
+      const date=pickBestDateFromTexts(texts);
+      if(store && date){
         await restoreTextOCR();
-        return {date,text:raw,angle};
+        return {store,date,text:texts.join("\n--- header pass ---\n"),angle};
       }
     }
   }
+
   await restoreTextOCR();
-  return null;
+  return {
+    store:pickStoreNameFromTexts(texts),
+    date:pickBestDateFromTexts(texts),
+    text:texts.join("\n--- header pass ---\n"),
+    angle:0
+  };
+}
+
+async function precisionShoppingDate(file){
+  const h=await precisionShoppingHeader(file);
+  return h.date ? {date:h.date,text:h.text,angle:h.angle} : null;
 }
 $("ocrBtn").onclick=async()=>{
   if(!currentFile)return;
@@ -905,29 +1040,24 @@ $("ocrBtn").onclick=async()=>{
       applyParsed(combined);
 
       if(currentTab==="shopping"){
-        // Accuracy-first: discard weak generic guesses before precision passes.
-        const genericName=safeShoppingStoreName(combined);
-        $("s-name").value=genericName||"";
-
-        const genericDate=parseDate(combined);
-        $("s-date").value=genericDate||"";
-
+        // Accuracy-first: use a dedicated header pass for store/date.
+        $("s-name").value="";
+        $("s-date").value="";
         $("s-amount").value="";
+
+        const ph=await precisionShoppingHeader(currentFile);
+        if(ph){
+          combined += "\n--- 店名・日付精密OCR ---\n"+ph.text;
+          $("raw").value=combined;
+          if(ph.store)$("s-name").value=ph.store;
+          if(ph.date)$("s-date").value=ph.date;
+        }
 
         const pa=await precisionShoppingAmount(currentFile);
         if(pa){
           combined += "\n--- 合計金額精密OCR ---\n"+pa.text;
           $("raw").value=combined;
           $("s-amount").value=pa.amount;
-        }
-
-        if(!$("s-date").value){
-          const pd=await precisionShoppingDate(currentFile);
-          if(pd){
-            combined += "\n--- 購入日精密OCR ---\n"+pd.text;
-            $("raw").value=combined;
-            $("s-date").value=pd.date;
-          }
         }
       }
 
@@ -1042,12 +1172,19 @@ function runSelfTest(){
   const ok8=parseDate(shopSample)==="2026-08-25";
   const ok9=validYMD(2035,6,25)==="";
   const ok10=pickRepeatedShoppingAmount([1738,1903,1485,5126,5126,10000,4874,5126]).n===5126;
+  const shopHeader=`小嶋屋総本店
+亀田インター店
+2026/08/25 (火) 13:42
+025-250-5700`;
+  const ok11=pickStoreNameFromTexts([shopHeader]).includes("亀田インター店");
+  const ok12=pickBestDateFromTexts([shopHeader])==="2026-08-25";
+  const ok13=pickStoreNameFromTexts(["田インター店"])==="亀田インター店";
 
   currentTab=oldTab;
 
-  const ok=ok1&&ok2&&ok3&&ok4&&ok5&&ok6&&ok7&&ok8&&ok9&&ok10;
+  const ok=ok1&&ok2&&ok3&&ok4&&ok5&&ok6&&ok7&&ok8&&ok9&&ok10&&ok11&&ok12&&ok13;
   const el=$("selftest");
-  el.textContent=ok?"内部抽出テスト：OK（買い物精度優先）":"内部抽出テスト：要修正";
+  el.textContent=ok?"内部抽出テスト：OK（店名＋日付＋合計）":"内部抽出テスト：要修正";
   if(!ok)el.style.background="#ffecec";
   return ok;
 }
