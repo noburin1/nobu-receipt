@@ -1,7 +1,7 @@
 {
   "name": "のぶ帳簿 FREE",
   "short_name": "のぶ帳簿",
-  "start_url": "./?v=9",
+  "start_url": "./?v=10",
   "display": "standalone",
   "background_color": "#f3f4f6",
   "theme_color": "#111827",

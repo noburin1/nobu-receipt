@@ -43,11 +43,17 @@ footer .inner{max-width:760px;margin:auto;display:flex;gap:10px}footer button{fl
     <button class="tab" data-type="medical">医療費</button>
     <button class="tab" data-type="withholding">源泉徴収票</button>
   </div>
-  <label>写真を撮る / 選ぶ</label>
-  <input id="photo" type="file" accept="image/*" capture="environment">
+  <label>写真を選ぶ</label>
+  <input id="photoLibrary" type="file" accept="image/*">
+  <div class="cameraBox" style="margin-top:10px;position:relative">
+    <div class="primary" style="text-align:center;border-radius:12px;padding:13px 14px;font-weight:700;font-size:16px">📷 カメラで撮影</div>
+    <input id="cameraInput" type="file" accept="image/*" capture="environment"
+      aria-label="カメラでレシートを撮影"
+      style="position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer">
+  </div>
   <img id="preview" alt="preview">
   <button id="ocrBtn" class="primary" style="width:100%;margin-top:10px">OCRして自動入力</button>
-  <div id="status" class="status">写真を選んでください。初回だけOCRモデルの読み込みに時間がかかります。</div>
+  <div id="status" class="status">写真を選んでください。カメラは青い「カメラで撮影」または下部の「レシート撮影」を直接タップしてください。初回OCRのみモデル読み込みがあります。</div>
 </div>
 
 <div class="card">
@@ -83,7 +89,12 @@ footer .inner{max-width:760px;margin:auto;display:flex;gap:10px}footer button{fl
 </div>
 </div>
 
-<footer><div class="inner"><button id="cameraFooter" class="primary">📷 レシート撮影</button></div></footer>
+<footer><div class="inner" style="position:relative">
+  <div class="primary" style="flex:1;text-align:center;border-radius:12px;padding:13px 14px;font-weight:700;font-size:16px">📷 レシート撮影</div>
+  <input id="cameraFooterInput" type="file" accept="image/*" capture="environment"
+    aria-label="レシートを撮影"
+    style="position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer">
+</div></footer>
 
 <script type="module">
 import { PaddleOCR } from "https://esm.sh/@paddleocr/paddleocr-js@latest?bundle";
@@ -232,12 +243,17 @@ function parseWithholding(t){
   return {year:y,gross:grab("支払金額"),tax:grab("源泉徴収税額"),social:grab("社会保険料")};
 }
 
-$("photo").addEventListener("change",e=>{
-  const f=e.target.files?.[0];if(!f)return;sourceFile=f;
-  const u=URL.createObjectURL(f);$("preview").src=u;$("preview").style.display="block";
-  setStatus("準備完了。OCRできます。","good");
-});
-$("cameraFooter").onclick=()=>$("photo").click();
+function handleSelectedFile(f){
+  if(!f)return;
+  sourceFile=f;
+  const u=URL.createObjectURL(f);
+  $("preview").src=u;
+  $("preview").style.display="block";
+  setStatus("撮影/選択できました。OCRできます。","good");
+}
+$("photoLibrary").addEventListener("change",e=>handleSelectedFile(e.target.files?.[0]));
+$("cameraInput").addEventListener("change",e=>handleSelectedFile(e.target.files?.[0]));
+$("cameraFooterInput").addEventListener("change",e=>handleSelectedFile(e.target.files?.[0]));
 
 $("ocrBtn").onclick=async()=>{
   if(!sourceFile){setStatus("先に写真を選んでください。","bad");return}
@@ -262,7 +278,8 @@ document.querySelectorAll(".tab").forEach(b=>b.onclick=()=>{
 
 function clearInputs(){
   ["date","amount","merchant","medDate","medAmount","medicalName","payer","taxYear","grossPay","withheldTax","socialInsurance","memo"].forEach(id=>$(id).value="");
-  $("photo").value="";$("preview").style.display="none";sourceFile=null;lastOcr="";$("ocrText").textContent="";
+  $("photoLibrary").value="";$("cameraInput").value="";$("cameraFooterInput").value="";
+  $("preview").style.display="none";sourceFile=null;lastOcr="";$("ocrText").textContent="";
 }
 $("clearBtn").onclick=()=>{clearInputs();setStatus("入力をクリアしました。")};
 
@@ -297,6 +314,6 @@ $("exportBtn").onclick=()=>{
 };
 
 render();
-if("serviceWorker"in navigator)navigator.serviceWorker.register("./sw.js?v=9").catch(()=>{});
+if("serviceWorker"in navigator)navigator.serviceWorker.register("./sw.js?v=10").catch(()=>{});
 </script>
 </body></html>
