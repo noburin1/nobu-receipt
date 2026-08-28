@@ -1,0 +1,403 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#f5f5f7">
+<title>のぶ帳簿 v13</title>
+<style>
+:root{font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif;color:#111;background:#f5f5f7}
+*{box-sizing:border-box}
+body{margin:0;padding:env(safe-area-inset-top) 12px calc(92px + env(safe-area-inset-bottom))}
+header{position:sticky;top:0;background:rgba(245,245,247,.95);backdrop-filter:blur(12px);padding:12px 0 8px;z-index:5}
+h1{font-size:24px;margin:0}.ver{font-size:12px;color:#666;margin-left:6px}
+.card{background:#fff;border-radius:16px;padding:14px;margin:10px 0;box-shadow:0 1px 6px rgba(0,0,0,.06)}
+.tabs{display:flex;gap:8px}.tabs button{flex:1}
+button{border:0;border-radius:12px;padding:12px 14px;font-weight:700;font-size:16px;background:#e9e9ed;color:#111}
+.primary{background:#0a84ff;color:#fff}.danger{background:#ff3b30;color:#fff}
+input,select,textarea{width:100%;border:1px solid #ddd;border-radius:10px;padding:10px;font-size:16px;background:#fff}
+label{display:block;font-size:13px;color:#555;margin:10px 0 5px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.status{font-size:14px;white-space:pre-wrap;background:#f3f4f6;border-radius:10px;padding:10px;min-height:44px}
+.ok{background:#eaf8ef}.err{background:#ffecec}
+#preview{width:100%;max-height:360px;object-fit:contain;background:#111;border-radius:12px}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.row>*{flex:1}
+.hidden{display:none!important}.small{font-size:12px;color:#666}.total{font-size:28px;font-weight:800}
+.history-item{border-top:1px solid #eee;padding:10px 0}
+footer{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(safe-area-inset-bottom));background:rgba(250,250,252,.96);backdrop-filter:blur(12px);z-index:10}
+.camwrap{position:relative}.camwrap input{position:absolute;inset:0;opacity:0;width:100%;height:100%}
+.badge{display:inline-block;border-radius:999px;padding:4px 8px;background:#e9e9ed;font-size:12px;font-weight:700}
+</style>
+</head>
+<body>
+<header><h1>のぶ帳簿 <span class="ver">v13・iPhone安定版</span></h1></header>
+
+<div class="card">
+  <span id="selftest" class="badge">内部テスト中…</span>
+  <p class="small">無料・APIキー不要。OCR画像は外部APIへ送信せず、Safari内で処理します。初回のみOCRライブラリ/日本語データをCDNから取得します。</p>
+</div>
+
+<div class="card">
+  <div class="tabs">
+    <button id="tab-shopping">買い物</button>
+    <button id="tab-medical" class="primary">医療費</button>
+    <button id="tab-tax">源泉徴収票</button>
+  </div>
+</div>
+
+<div class="card">
+  <div class="grid2">
+    <div class="camwrap"><button class="primary" style="width:100%">📷 カメラで撮影</button><input id="camera" type="file" accept="image/*" capture="environment"></div>
+    <div class="camwrap"><button style="width:100%">写真を選ぶ</button><input id="picker" type="file" accept="image/*"></div>
+  </div>
+  <img id="preview" class="hidden" alt="preview">
+  <button id="ocrBtn" class="primary" style="width:100%;margin-top:10px" disabled>OCRして自動入力</button>
+  <div id="status" class="status" style="margin-top:10px">v13を読み込みました。領収書を撮影してください。</div>
+</div>
+
+<div id="form-medical" class="card">
+  <h2>医療費</h2>
+  <label>医療機関名</label><input id="m-name" placeholder="例：○○歯科">
+  <label>日付</label><input id="m-date" type="date">
+  <label>支払額（円）</label><input id="m-amount" inputmode="numeric" placeholder="例：370">
+  <button id="saveMedical" class="primary" style="width:100%;margin-top:12px">医療費として保存</button>
+</div>
+
+<div id="form-shopping" class="card hidden">
+  <h2>買い物</h2>
+  <label>店名</label><input id="s-name">
+  <label>日付</label><input id="s-date" type="date">
+  <label>金額（円）</label><input id="s-amount" inputmode="numeric">
+  <button id="saveShopping" class="primary" style="width:100%;margin-top:12px">買い物として保存</button>
+</div>
+
+<div id="form-tax" class="card hidden">
+  <h2>源泉徴収票</h2>
+  <label>支払者名</label><input id="t-name">
+  <label>年</label><input id="t-year" inputmode="numeric">
+  <label>支払金額</label><input id="t-payment" inputmode="numeric">
+  <label>源泉徴収税額</label><input id="t-tax" inputmode="numeric">
+  <button id="saveTax" class="primary" style="width:100%;margin-top:12px">源泉徴収票として保存</button>
+</div>
+
+<div class="card">
+  <div class="grid2">
+    <div><div class="small">今月の買い物</div><div id="shoppingTotal" class="total">0円</div></div>
+    <div><div class="small">今年の医療費</div><div id="medicalTotal" class="total">0円</div></div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="row">
+    <select id="filter"><option value="all">全履歴</option><option value="shopping">買い物</option><option value="medical">医療費</option><option value="tax">源泉徴収票</option></select>
+    <button id="csvBtn">CSV出力</button>
+  </div>
+  <div id="history"></div>
+</div>
+
+<details class="card"><summary>OCR原文を見る</summary><textarea id="raw" rows="14" readonly></textarea></details>
+
+<footer>
+  <div class="camwrap"><button class="primary" style="width:100%">📷 レシート撮影</button><input id="camera2" type="file" accept="image/*" capture="environment"></div>
+</footer>
+
+<script>
+const KEY="nobu-receipt-v3";
+const TESS_URL="https://cdn.jsdelivr.net/npm/tesseract.js@7.0.0/dist/tesseract.min.js";
+let db=JSON.parse(localStorage.getItem(KEY)||"[]");
+let currentFile=null,currentTab="medical",worker=null,loadPromise=null;
+const $=id=>document.getElementById(id);
+const yen=n=>new Intl.NumberFormat("ja-JP").format(Number(n)||0)+"円";
+
+function setStatus(msg,kind=""){
+  const el=$("status"); el.textContent=msg; el.className="status"+(kind?" "+kind:"");
+}
+function loadTesseract(){
+  if(window.Tesseract)return Promise.resolve();
+  if(loadPromise)return loadPromise;
+  loadPromise=new Promise((resolve,reject)=>{
+    setStatus("OCRライブラリを読み込み中…");
+    const s=document.createElement("script");
+    s.src=TESS_URL;s.async=true;
+    s.onload=()=>window.Tesseract?resolve():reject(new Error("OCRライブラリを読み込めませんでした"));
+    s.onerror=()=>reject(new Error("OCRライブラリの取得に失敗しました"));
+    document.head.appendChild(s);
+  });
+  return loadPromise;
+}
+function saveDB(){localStorage.setItem(KEY,JSON.stringify(db));render();}
+function setTab(tab){
+  currentTab=tab;
+  ["shopping","medical","tax"].forEach(x=>{
+    $("form-"+x).classList.toggle("hidden",x!==tab);
+    $("tab-"+x).classList.toggle("primary",x===tab);
+  });
+}
+["shopping","medical","tax"].forEach(x=>$("tab-"+x).onclick=()=>setTab(x));
+
+function onFile(file){
+  if(!file)return;
+  currentFile=file;
+  $("preview").src=URL.createObjectURL(file);
+  $("preview").classList.remove("hidden");
+  $("ocrBtn").disabled=false;
+  setStatus("写真を受け取りました。「OCRして自動入力」を押してください。");
+}
+["camera","picker","camera2"].forEach(id=>$(id).addEventListener("change",e=>onFile(e.target.files[0])));
+
+function normalize(s){
+  return String(s||"")
+    .replace(/[，,]/g,"")
+    .replace(/[￥¥]/g,"円")
+    .replace(/[ＯO〇]/g,"0")
+    .replace(/[ＩIl｜]/g,"1")
+    .replace(/[：:]/g,":");
+}
+function reiwaToISO(y,m,d){
+  const yy=Number(y)+2018;
+  if(!yy||!m||!d)return "";
+  return `${yy}-${String(m).padStart(2,"0")}-${String(d).padStart(2,"0")}`;
+}
+function parseDate(text){
+  const s=normalize(text);
+  let m=s.match(/令和\s*(\d{1,2})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日/);
+  if(m)return reiwaToISO(m[1],m[2],m[3]);
+  m=s.match(/(20\d{2})\s*[\/.\-年]\s*(\d{1,2})\s*[\/.\-月]\s*(\d{1,2})/);
+  if(m)return `${m[1]}-${String(m[2]).padStart(2,"0")}-${String(m[3]).padStart(2,"0")}`;
+  return "";
+}
+function excludedAmountLine(s){
+  return /点|負担割合|負担上限|上限|No\.?|番号|受付|保険|患者|コード|電話|TEL|診療報酬/i.test(s);
+}
+function amountsInLine(s){
+  const out=[];
+  const x=normalize(s);
+  for(const m of x.matchAll(/(?:円\s*)?(\d{2,7})(?:\s*円)?/g)){
+    const n=Number(m[1]); if(n>=10&&n<=9999999)out.push(n);
+  }
+  return out;
+}
+function parseAmount(text){
+  const lines=String(text||"").split(/\n+/).map(x=>x.trim()).filter(Boolean);
+  const counts={};
+  for(const line of lines){
+    const s=normalize(line);
+    if(excludedAmountLine(s))continue;
+    for(const n of amountsInLine(s))counts[n]=(counts[n]||0)+1;
+  }
+  const cands=[];
+  lines.forEach((line,idx)=>{
+    const s=normalize(line);
+    if(excludedAmountLine(s))return;
+    const strong=/(領収金額|お支払(?:い)?額|支払額|負担額|請求額|現計|総額|合計金額|TOTAL)/i.test(s);
+    const weak=/(合計|支払|領収|請求|金額)/i.test(s);
+    for(const n of amountsInLine(s)){
+      let score=0;
+      if(strong)score+=160; else if(weak)score+=80;
+      if(/円/.test(s))score+=50;
+      if((counts[n]||0)>=2)score+=100;
+      score+=Math.round(30*idx/Math.max(1,lines.length-1));
+      if(n%10===0)score+=10;
+      cands.push({n,score,line:s});
+    }
+  });
+  cands.sort((a,b)=>b.score-a.score||a.n-b.n);
+  return cands[0]?.n||"";
+}
+function parseName(text){
+  const lines=String(text||"").split(/\n+/).map(x=>x.trim()).filter(Boolean);
+  const bad=/領収|明細|患者|氏名|年月日|保険|負担|点数|合計|電話|TEL|No\.?|番号|診療/i;
+  const preferred=lines
+    .map(l=>l.replace(/[|｜]/g,"").trim())
+    .filter(l=>/(歯科|医院|病院|クリニック|薬局|診療所)/.test(l)&&!bad.test(l));
+  if(preferred.length)return preferred.sort((a,b)=>a.length-b.length)[0].replace(/\s+/g,"");
+  const first=lines.find(l=>l.length>=3&&l.length<=25&&!bad.test(l)&&!/^[\d\s\-\/.]+$/.test(l));
+  return first?first.replace(/\s+/g,""):"";
+}
+function parseTax(text){
+  const s=normalize(text);
+  const y=(s.match(/(20\d{2}|令和\s*\d{1,2})\s*年/)||[])[1]||"";
+  let year="";
+  if(/^20/.test(y))year=y; else if(y)year=String(Number((y.match(/\d+/)||[""])[0])+2018);
+  const pay=(s.match(/支払金額[^\d]{0,30}(\d{4,10})/)||[])[1]||"";
+  const tax=(s.match(/源泉徴収税額[^\d]{0,30}(\d{1,10})/)||[])[1]||"";
+  return {year,pay,tax};
+}
+function applyParsed(text){
+  $("raw").value=text;
+  if(currentTab==="medical"){
+    $("m-name").value=parseName(text)||$("m-name").value;
+    $("m-date").value=parseDate(text)||$("m-date").value;
+    $("m-amount").value=parseAmount(text)||$("m-amount").value;
+  }else if(currentTab==="shopping"){
+    $("s-name").value=parseName(text)||$("s-name").value;
+    $("s-date").value=parseDate(text)||$("s-date").value;
+    $("s-amount").value=parseAmount(text)||$("s-amount").value;
+  }else{
+    const t=parseTax(text);
+    $("t-year").value=t.year||$("t-year").value;
+    $("t-payment").value=t.pay||$("t-payment").value;
+    $("t-tax").value=t.tax||$("t-tax").value;
+  }
+}
+
+async function ensureWorker(){
+  if(worker)return worker;
+  await loadTesseract();
+  setStatus("日本語OCRエンジンを初期化中… 初回だけ時間がかかります。");
+  worker=await Tesseract.createWorker("jpn",1,{
+    logger:m=>{
+      const p=Number.isFinite(m.progress)?` ${Math.round(m.progress*100)}%`:"";
+      setStatus(`${m.status||"OCR準備中"}${p}`);
+    }
+  });
+  try{
+    await worker.setParameters({
+      tessedit_pageseg_mode:Tesseract.PSM.AUTO,
+      preserve_interword_spaces:"1"
+    });
+  }catch(_){}
+  return worker;
+}
+function loadImage(file){
+  return new Promise((resolve,reject)=>{
+    const img=new Image();
+    const u=URL.createObjectURL(file);
+    img.onload=()=>{URL.revokeObjectURL(u);resolve(img)};
+    img.onerror=e=>{URL.revokeObjectURL(u);reject(e)};
+    img.src=u;
+  });
+}
+async function makeCanvas(file,mode="full",angle=0){
+  const img=await loadImage(file);
+  const maxSide=1600;
+  const scale=Math.min(1,maxSide/Math.max(img.naturalWidth,img.naturalHeight));
+  let w=Math.max(1,Math.round(img.naturalWidth*scale));
+  let h=Math.max(1,Math.round(img.naturalHeight*scale));
+  let base=document.createElement("canvas");base.width=w;base.height=h;
+  let bx=base.getContext("2d",{willReadFrequently:true});
+  bx.drawImage(img,0,0,w,h);
+  if(mode==="bottom"){
+    const y=Math.floor(h*.45),ch=h-y;
+    const c=document.createElement("canvas");c.width=w;c.height=ch;
+    c.getContext("2d",{willReadFrequently:true}).drawImage(base,0,y,w,ch,0,0,w,ch);
+    base=c;w=c.width;h=c.height;
+  }
+  // Receipt-friendly grayscale + moderate contrast.
+  const ctx=base.getContext("2d",{willReadFrequently:true});
+  const im=ctx.getImageData(0,0,w,h),d=im.data;
+  for(let i=0;i<d.length;i+=4){
+    let g=.299*d[i]+.587*d[i+1]+.114*d[i+2];
+    g=Math.max(0,Math.min(255,(g-128)*1.35+128));
+    d[i]=d[i+1]=d[i+2]=g;
+  }
+  ctx.putImageData(im,0,0);
+  if(!angle)return base;
+  const c=document.createElement("canvas");c.width=h;c.height=w;
+  const x=c.getContext("2d");
+  x.translate(c.width/2,c.height/2);x.rotate(angle*Math.PI/180);x.drawImage(base,-w/2,-h/2);
+  return c;
+}
+async function recognize(source,auto=true){
+  const w=await ensureWorker();
+  const r=await w.recognize(source,{rotateAuto:auto});
+  return r.data.text||"";
+}
+function scoreParsed(t){
+  return (parseDate(t)?3:0)+(parseAmount(t)?3:0)+(parseName(t)?2:0)+Math.min(2,t.length/300);
+}
+
+$("ocrBtn").onclick=async()=>{
+  if(!currentFile)return;
+  $("ocrBtn").disabled=true;$("ocrBtn").textContent="OCR処理中…";
+  try{
+    setStatus("領収書全体をOCR中…");
+    const full=await makeCanvas(currentFile,"full",0);
+    let best=await recognize(full,true);
+
+    setStatus("金額欄を重点OCR中…");
+    const bottom=await makeCanvas(currentFile,"bottom",0);
+    const btxt=await recognize(bottom,false);
+    best += "\n--- 下部重点OCR ---\n"+btxt;
+
+    // Only do an extra 90° pass when core fields are still weak.
+    if(!parseAmount(best)||!parseDate(best)||!parseName(best)){
+      setStatus("向きを変えて補助OCR中…");
+      const r90=await makeCanvas(currentFile,"full",90);
+      const t90=await recognize(r90,false);
+      const candidate=best+"\n--- 90度補助OCR ---\n"+t90;
+      if(scoreParsed(candidate)>=scoreParsed(best))best=candidate;
+    }
+
+    applyParsed(best);
+    const a=currentTab==="medical"?$("m-amount").value:currentTab==="shopping"?$("s-amount").value:"";
+    const d=currentTab==="medical"?$("m-date").value:currentTab==="shopping"?$("s-date").value:"";
+    const n=currentTab==="medical"?$("m-name").value:currentTab==="shopping"?$("s-name").value:"";
+    const found=[n&&`名称「${n}」`,d&&`日付 ${d}`,a&&`金額 ${a}円`].filter(Boolean).join(" / ");
+    setStatus("OCR完了。"+(found||"自動抽出できない項目があります。")+"\n保存前に内容を確認してください。","ok");
+  }catch(e){
+    console.error(e);
+    worker=null;
+    loadPromise=null;
+    setStatus("OCRエラー: "+(e?.message||String(e))+"\n通信が安定した状態でもう一度押してください。入力・保存機能はそのまま使えます。","err");
+  }finally{
+    $("ocrBtn").disabled=false;$("ocrBtn").textContent="OCRして自動入力";
+  }
+};
+
+function add(type,obj){
+  db.unshift({id:Date.now(),type,...obj,createdAt:new Date().toISOString()});
+  saveDB();
+  setStatus("保存しました。","ok");
+}
+$("saveMedical").onclick=()=>add("medical",{name:$("m-name").value.trim(),date:$("m-date").value,amount:Number($("m-amount").value||0),ocr:$("raw").value});
+$("saveShopping").onclick=()=>add("shopping",{name:$("s-name").value.trim(),date:$("s-date").value,amount:Number($("s-amount").value||0),ocr:$("raw").value});
+$("saveTax").onclick=()=>add("tax",{name:$("t-name").value.trim(),year:$("t-year").value,payment:Number($("t-payment").value||0),tax:Number($("t-tax").value||0),ocr:$("raw").value});
+$("filter").onchange=render;
+
+function render(){
+  const now=new Date(),ym=`${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,"0")}`,y=String(now.getFullYear());
+  const st=db.filter(x=>x.type==="shopping"&&String(x.date||"").startsWith(ym)).reduce((s,x)=>s+(+x.amount||0),0);
+  const mt=db.filter(x=>x.type==="medical"&&String(x.date||"").startsWith(y)).reduce((s,x)=>s+(+x.amount||0),0);
+  $("shoppingTotal").textContent=yen(st);$("medicalTotal").textContent=yen(mt);
+  const f=$("filter").value,arr=db.filter(x=>f==="all"||x.type===f);
+  $("history").innerHTML=arr.length?arr.map(x=>{
+    const title=x.type==="medical"?"医療費":x.type==="shopping"?"買い物":"源泉徴収票";
+    const val=x.type==="tax"?`支払 ${yen(x.payment)} / 税 ${yen(x.tax)}`:yen(x.amount);
+    const when=x.date||x.year||"";
+    return `<div class="history-item"><b>${title}</b>　${escapeHtml(x.name||"")}<br><span class="small">${escapeHtml(when)} / ${val}</span><br><button class="danger" onclick="del(${x.id})">削除</button></div>`;
+  }).join(""):"<p class='small'>まだ記録はありません。</p>";
+}
+function escapeHtml(s){return String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[c]))}
+window.del=id=>{if(confirm("この記録を削除しますか？")){db=db.filter(x=>x.id!==id);saveDB()}};
+
+$("csvBtn").onclick=()=>{
+  const rows=[["type","name","date/year","amount/payment","withholding_tax","created_at"]];
+  db.forEach(x=>rows.push([x.type,x.name||"",x.date||x.year||"",x.type==="tax"?x.payment:x.amount,x.type==="tax"?x.tax:"",x.createdAt]));
+  const csv="\uFEFF"+rows.map(r=>r.map(v=>`"${String(v??"").replace(/"/g,'""')}"`).join(",")).join("\r\n");
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv;charset=utf-8"}));
+  a.download="nobu-ledger.csv";a.click();
+};
+
+function runSelfTest(){
+  const sample=`大通り歯科
+令和8年8月12日
+63点
+114点
+7点
+合計 184点
+負担上限 18,000円
+領収金額 370円
+お支払額 370円`;
+  const ok=parseName(sample)==="大通り歯科"&&parseDate(sample)==="2026-08-12"&&parseAmount(sample)===370;
+  const el=$("selftest");
+  el.textContent=ok?"内部抽出テスト：OK":"内部抽出テスト：要修正";
+  if(!ok)el.style.background="#ffecec";
+  return ok;
+}
+
+render();setTab("medical");runSelfTest();
+</script>
+</body>
+</html>
