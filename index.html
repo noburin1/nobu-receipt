@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#f5f5f7">
-<title>のぶ帳簿 v23 店名学習版</title>
+<title>のぶ帳簿 v24 会計整合判定版</title>
 <style>
 :root{font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif;color:#111;background:#f5f5f7}
 *{box-sizing:border-box}
@@ -30,7 +30,7 @@ footer{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(
 </style>
 </head>
 <body>
-<header><h1>のぶ帳簿 <span class="ver">v23・店名学習版</span></h1></header>
+<header><h1>のぶ帳簿 <span class="ver">v24・会計整合判定版</span></h1></header>
 
 <div class="card">
   <span id="selftest" class="badge">内部テスト中…</span><span class="badge" style="margin-left:6px">PaddleOCR不使用</span><span class="badge" style="margin-left:6px">店名学習ON</span>
@@ -53,7 +53,7 @@ footer{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(
   <p class="small"><b>買い物レシートは、店名・日付・合計金額が全部入るようにレシート全体を撮影してください。</b></p>
   <img id="preview" class="hidden" alt="preview">
   <button id="ocrBtn" class="primary" style="width:100%;margin-top:10px" disabled>OCRして自動入力</button>
-  <div id="status" class="status" style="margin-top:10px">v23安定版を読み込みました。店名は一度確定すると次回から学習補完します。</div>
+  <div id="status" class="status" style="margin-top:10px">v24安定版を読み込みました。合計は「預り−お釣り」でも照合します。</div>
 </div>
 
 <div id="form-medical" class="card">
@@ -742,6 +742,93 @@ function safeShoppingStoreName(text){
 }
 
 
+
+function labeledAmountFromLines(text,labelRe,forbiddenRe=null){
+  const lines=String(text||"").split(/\n+/).map(x=>normalize(x.trim())).filter(Boolean);
+  for(let i=0;i<lines.length;i++){
+    const line=lines[i];
+    if(!labelRe.test(line))continue;
+    if(forbiddenRe && forbiddenRe.test(line))continue;
+
+    // Same line first.
+    let nums=amountsInLine(line).filter(n=>n>=1&&n<=9999999);
+    if(nums.length)return nums.sort((a,b)=>b-a)[0];
+
+    // OCR may split label and amount onto next line.
+    if(i+1<lines.length){
+      const nxt=lines[i+1];
+      if(forbiddenRe && forbiddenRe.test(nxt))continue;
+      nums=amountsInLine(nxt).filter(n=>n>=1&&n<=9999999);
+      if(nums.length)return nums.sort((a,b)=>b-a)[0];
+    }
+  }
+  return "";
+}
+
+function countNumberOccurrences(text,n){
+  const digits=String(n);
+  const loose=new RegExp(digits.split("").join("[,，\\s]*"),"g");
+  return (normalize(text).match(loose)||[]).length;
+}
+
+function resolveShoppingAmountAccounting(text){
+  const raw=String(text||"");
+
+  // 1) Explicit total label remains the strongest signal.
+  const total=shoppingTotalFromLabel(raw);
+  if(total){
+    return {amount:total.amount,confidence:1200,source:"total-label"};
+  }
+
+  // 2) Accounting identity: tender - change = actual paid total.
+  const tender=labeledAmountFromLines(
+    raw,
+    /(現金お預り|現金預り|お預り|お預かり|預り|預かり)/i,
+    /(お釣|釣銭|つり)/i
+  );
+  const change=labeledAmountFromLines(
+    raw,
+    /(お釣り|お釣|釣銭|つり)/i
+  );
+
+  if(tender && change && tender>change){
+    const calc=tender-change;
+    if(calc>=50 && calc<=9999999){
+      const occurrences=countNumberOccurrences(raw,calc);
+      // Strong if the computed result also appears somewhere on the receipt.
+      return {
+        amount:calc,
+        confidence:occurrences>=1 ? 1150 : 900,
+        source:occurrences>=1 ? "tender-minus-change-confirmed" : "tender-minus-change"
+      };
+    }
+  }
+
+  // 3) Repeated amount inside ONE OCR text only (not overlapping crops).
+  // Exclude tender/change/tax lines before counting.
+  const filtered=raw.split(/\n+/)
+    .filter(line=>!/(現金お預り|現金預り|お預り|預り|お釣|釣銭|つり|内消費税|消費税|税率|登録番号)/i.test(line))
+    .join("\n");
+
+  const counts=new Map();
+  for(const m of normalize(filtered).matchAll(/(?:円\s*|[¥￥]\s*)?(\d{2,7})(?:\s*円)?/g)){
+    const n=Number(m[1]);
+    if(n<50||n>9999999)continue;
+    counts.set(n,(counts.get(n)||0)+1);
+  }
+
+  const repeated=[...counts.entries()]
+    .filter(([,c])=>c>=2)
+    .map(([n,c])=>({n,c,score:c*100+(n>=100?20:0)}))
+    .sort((a,b)=>b.score-a.score||b.n-a.n)[0];
+
+  if(repeated){
+    return {amount:repeated.n,confidence:700+repeated.c*50,source:"single-text-repeat"};
+  }
+
+  return null;
+}
+
 function shoppingTotalFromLabel(text){
   const lines=String(text||"").split(/\n+/).map(x=>normalize(x.trim())).filter(Boolean);
   const totalLabel=/(総合計|お買上合計|お買い上げ合計|合計|TOTAL|総額|現計|お支払額|お支払い額|支払額)/i;
@@ -905,24 +992,23 @@ async function precisionShoppingAmountByVotes(file){
 }
 
 async function precisionShoppingAmount(file,baseText=""){
-  // 0) Trust an already-read semantic total such as:
-  // "合計 3点 ¥5,126". This is stronger evidence than repeated crop OCR.
-  const baseSemantic=shoppingTotalFromLabel(baseText);
-  if(baseSemantic){
+  // 0) Resolve from already-read OCR text using receipt/accounting semantics.
+  const accounting=resolveShoppingAmountAccounting(baseText);
+  if(accounting && accounting.confidence>=900){
     return {
-      amount:baseSemantic.amount,
-      score:1200,
-      text:baseSemantic.line,
+      amount:accounting.amount,
+      score:accounting.confidence,
+      text:`accounting resolver: ${accounting.source}`,
       angle:0,
-      source:"base-total-label"
+      source:accounting.source
     };
   }
 
-  // 1) Dedicated OCR for total labels.
+  // 1) Dedicated OCR for the amount area, then run the same accounting resolver.
   const angles=[0,90,-90];
   const zones=[
-    [0.00,0.25,1.00,0.82],
-    [0.00,0.15,1.00,0.95],
+    [0.00,0.20,1.00,0.88],
+    [0.00,0.05,1.00,0.98],
     [0.00,0.00,1.00,1.00]
   ];
 
@@ -934,9 +1020,9 @@ async function precisionShoppingAmount(file,baseText=""){
     const oriented=await makeCanvas(file,"full",angle);
 
     for(let zi=0;zi<zones.length;zi++){
-      setStatus(`「合計」欄を精密OCR中… ${angle}° ${zi+1}/${zones.length}`);
+      setStatus(`合計・預り・お釣りを照合中… ${angle}° ${zi+1}/${zones.length}`);
       const z=zones[zi];
-      const part=cropCanvas(oriented,z[0],z[1],z[2],z[3],zi===2?1.15:1.9);
+      const part=cropCanvas(oriented,z[0],z[1],z[2],z[3],zi===2?1.2:1.9);
 
       await w.setParameters({
         tessedit_char_whitelist:"",
@@ -946,20 +1032,18 @@ async function precisionShoppingAmount(file,baseText=""){
 
       const r=await w.recognize(part,{rotateAuto:false});
       const raw=r.data.text||"";
-      const sem=shoppingTotalFromLabel(raw);
+      const resolved=resolveShoppingAmountAccounting(raw);
 
-      if(sem){
+      if(resolved){
         const candidate={
-          amount:sem.amount,
-          score:sem.confidence,
+          amount:resolved.amount,
+          score:resolved.confidence,
           text:raw,
           angle,
-          source:sem.source
+          source:resolved.source
         };
         if(!best || candidate.score>best.score)best=candidate;
-
-        // Same-line 合計 is strong enough to stop.
-        if(sem.confidence>=1000){
+        if(candidate.score>=1100){
           await restoreTextOCR();
           return candidate;
         }
@@ -968,19 +1052,18 @@ async function precisionShoppingAmount(file,baseText=""){
   }
 
   await restoreTextOCR();
+
   if(best)return best;
 
-  // 2) Last resort only: repeated numeric OCR.
-  // This is deliberately lower confidence because overlapping crops can see
-  // the same physical number several times.
-  const voted=await precisionShoppingAmountByVotes(file);
-  if(voted){
+  // 2) Only as a last fallback use the old semantic label parser.
+  const sem=shoppingTotalFromLabel(baseText);
+  if(sem){
     return {
-      amount:voted.n,
-      score:voted.score,
-      text:`numeric fallback ${voted.n}`,
-      angle:voted.angle,
-      source:"numeric-fallback"
+      amount:sem.amount,
+      score:sem.confidence,
+      text:sem.line,
+      angle:0,
+      source:"fallback-total-label"
     };
   }
 
@@ -1283,12 +1366,9 @@ $("ocrBtn").onclick=async()=>{
           combined += "\n--- 合計金額精密OCR ---\n"+pa.text;
           $("raw").value=combined;
 
-          const sem=shoppingTotalFromLabel(combined);
-          if(sem){
-            $("s-amount").value=sem.amount;
-          }else{
-            $("s-amount").value=pa.amount;
-          }
+          // Final authority: run accounting consistency on ALL OCR text.
+          const finalAmount=resolveShoppingAmountAccounting(combined);
+          $("s-amount").value=(finalAmount?.amount)||pa.amount;
         }
       }
 
@@ -1436,12 +1516,23 @@ function runSelfTest(){
 2026/08/25 13:42`;
   const ok16=learnedStoreFromText(learnedTest).name==="小嶋屋総本店 亀田インター店";
   const ok17=extractPhones(learnedTest)[0]==="0252505700";
+  const accountingCase=`飲食売上
+選にぎわい膳 / ミニ海鮮丼 ¥1,738
+天重膳 ¥1,903
+へぎそば大盛り ¥1,485
+合計 3点 ¥5,126
+(内消費税等 ¥466)
+現金お預り ¥10,000
+お釣り ¥4,874
+(領収証対象金額 ¥5,126)`;
+  const ok18=resolveShoppingAmountAccounting(accountingCase).amount===5126;
+  const ok19=resolveShoppingAmountAccounting(accountingCase).source==="total-label";
 
   currentTab=oldTab;
 
-  const ok=ok1&&ok2&&ok3&&ok4&&ok5&&ok6&&ok7&&ok8&&ok9&&ok10&&ok11&&ok12&&ok13&&ok14&&ok15&&ok16&&ok17;
+  const ok=ok1&&ok2&&ok3&&ok4&&ok5&&ok6&&ok7&&ok8&&ok9&&ok10&&ok11&&ok12&&ok13&&ok14&&ok15&&ok16&&ok17&&ok18&&ok19;
   const el=$("selftest");
-  el.textContent=ok?"内部抽出テスト：OK（合計＋店名学習）":"内部抽出テスト：要修正";
+  el.textContent=ok?"内部抽出テスト：OK（店名学習＋会計整合）":"内部抽出テスト：要修正";
   if(!ok)el.style.background="#ffecec";
   return ok;
 }
