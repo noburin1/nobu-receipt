@@ -181,16 +181,17 @@ $("ocrBtn").onclick=async()=>{
   if(!imageData){setStatus("先に写真を選んでください。","bad");return}
   setStatus("Google Visionで読み取り中…");$("ocrBtn").disabled=true;
   try{
-    const r=await fetch(WORKER_URL,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({image:imageData})});
+    const r=await fetch(WORKER_URL,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({image:imageData,type})});
     const data=await r.json();
     if(!r.ok||data.ok===false)throw new Error(data.error||`HTTP ${r.status}`);
     const text=data.text||"";
-    if(!text)throw new Error("OCR文字列が返りませんでした");
+    const f=data.fields||{};
+    if(!text&&!Object.keys(f).length)throw new Error("OCR結果が返りませんでした");
     lastOcr=text;$("ocrText").textContent=text;
-    const d=parseDate(text),n=parseName(text),a=parseAmount(text);
+    const d=f.date||parseDate(text),n=f.name||parseName(text),a=Number(f.amount||0)||parseAmount(text);
     if(type==="shopping"){if(d)$("date").value=d;if(n)$("merchant").value=n;if(a)$("amount").value=a}
-    if(type==="medical"){if(d)$("medDate").value=d;if(n)$("medicalName").value=n;if(a)$("medAmount").value=a;if(/歯科/.test(text))$("medicalKind").value="歯科";else if(/薬局|調剤/.test(text))$("medicalKind").value="薬局"}
-    if(type==="withholding"){const w=parseWithholding(text);if(w.year)$("taxYear").value=w.year;if(w.gross)$("grossPay").value=w.gross;if(w.tax)$("withheldTax").value=w.tax;if(w.social)$("socialInsurance").value=w.social;if(n)$("payer").value=n}
+    if(type==="medical"){if(d)$("medDate").value=d;if(n)$("medicalName").value=n;if(a)$("medAmount").value=a;if(/歯科/.test((n||"")+" "+text))$("medicalKind").value="歯科";else if(/薬局|調剤/.test((n||"")+" "+text))$("medicalKind").value="薬局"}
+    if(type==="withholding"){const w=parseWithholding(text);if(f.year||w.year)$("taxYear").value=f.year||w.year;if(f.grossPay||w.gross)$("grossPay").value=f.grossPay||w.gross;if(f.withheldTax||w.tax)$("withheldTax").value=f.withheldTax||w.tax;if(f.socialInsurance||w.social)$("socialInsurance").value=f.socialInsurance||w.social;if(n)$("payer").value=n}
     setStatus("読み取り完了。内容を確認して保存してください。","good");
   }catch(e){setStatus("OCR失敗: "+e.message,"bad")}
   finally{$("ocrBtn").disabled=false}
@@ -241,7 +242,7 @@ $("exportBtn").onclick=()=>{
 };
 
 render();
-if("serviceWorker"in navigator)navigator.serviceWorker.register("./sw.js?v=6").catch(()=>{});
+if("serviceWorker"in navigator)navigator.serviceWorker.register("./sw.js?v=7").catch(()=>{});
 </script>
 </body>
 </html>

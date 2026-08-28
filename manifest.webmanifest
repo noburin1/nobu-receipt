@@ -1,7 +1,7 @@
 {
   "name": "のぶ帳簿",
   "short_name": "のぶ帳簿",
-  "start_url": "./?v=6",
+  "start_url": "./?v=7",
   "display": "standalone",
   "background_color": "#f3f4f6",
   "theme_color": "#111827",
