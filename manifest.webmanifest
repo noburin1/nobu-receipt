@@ -1,10 +1,10 @@
 {
-  "name": "のぶ帳簿",
+  "name": "のぶ帳簿 FREE",
   "short_name": "のぶ帳簿",
-  "start_url": "./?v=8",
+  "start_url": "./?v=9",
   "display": "standalone",
   "background_color": "#f3f4f6",
   "theme_color": "#111827",
   "lang": "ja",
-  "description": "買い物・医療費・源泉徴収票をiPhoneで管理"
+  "description": "無料・カード不要・APIキー不要のiPhone帳簿。PaddleOCRを端末内実行。"
 }
