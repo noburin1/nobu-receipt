@@ -1,116 +1,74 @@
+const ALLOWED_ORIGIN="https://noburin1.github.io";
+
+function cors(){
+  return {
+    "Access-Control-Allow-Origin":ALLOWED_ORIGIN,
+    "Access-Control-Allow-Methods":"POST,OPTIONS",
+    "Access-Control-Allow-Headers":"Content-Type",
+    "Vary":"Origin"
+  };
+}
+
 export default {
-  async fetch(request, env) {
-    const allowedOrigin = "https://noburin1.github.io";
-    const origin = request.headers.get("Origin") || "";
+  async fetch(request,env){
+    const origin=request.headers.get("Origin")||"";
 
-    const corsHeaders = {
-      "Access-Control-Allow-Origin": allowedOrigin,
-      "Access-Control-Allow-Methods": "POST, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type",
-      "Vary": "Origin",
-    };
-
-    if (request.method === "OPTIONS") {
-      return new Response(null, { status: 204, headers: corsHeaders });
+    if(request.method==="OPTIONS"){
+      if(origin!==ALLOWED_ORIGIN)return new Response("Forbidden",{status:403});
+      return new Response(null,{headers:cors()});
     }
 
-    if (request.method !== "POST") {
-      return json({ ok: false, error: "POST only" }, 405, corsHeaders);
+    if(request.method==="GET"){
+      return Response.json({ok:true,service:"nobu-receipt-ocr-v6"});
     }
 
-    if (origin && origin !== allowedOrigin) {
-      return json({ ok: false, error: "Origin not allowed" }, 403, corsHeaders);
+    if(request.method!=="POST"){
+      return Response.json({ok:false,error:"POST only"},{status:405,headers:cors()});
     }
 
-    if (!env.GOOGLE_VISION_API_KEY) {
-      return json(
-        { ok: false, error: "Google Vision API key is not configured" },
-        500,
-        corsHeaders
-      );
+    if(origin!==ALLOWED_ORIGIN){
+      return Response.json({ok:false,error:"Forbidden origin"},{status:403,headers:cors()});
     }
 
-    try {
-      const body = await request.json();
-
-      if (!body.image || typeof body.image !== "string") {
-        return json({ ok: false, error: "画像データがありません" }, 400, corsHeaders);
+    try{
+      const {image}=await request.json();
+      if(!image||typeof image!=="string"){
+        return Response.json({ok:false,error:"image is required"},{status:400,headers:cors()});
       }
 
-      const base64Image = body.image.replace(
-        /^data:image\/[a-zA-Z0-9.+-]+;base64,/,
-        ""
-      );
-
-      if (base64Image.length > 12000000) {
-        return json({ ok: false, error: "画像サイズが大きすぎます" }, 413, corsHeaders);
+      const base64=image.includes(",")?image.split(",")[1]:image;
+      if(base64.length>12000000){
+        return Response.json({ok:false,error:"image too large"},{status:413,headers:cors()});
       }
 
-      const visionResponse = await fetch(
-        "https://vision.googleapis.com/v1/images:annotate?key=" +
-          encodeURIComponent(env.GOOGLE_VISION_API_KEY),
+      const r=await fetch(
+        `https://vision.googleapis.com/v1/images:annotate?key=${encodeURIComponent(env.GOOGLE_VISION_API_KEY)}`,
         {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            requests: [
-              {
-                image: { content: base64Image },
-                features: [{ type: "DOCUMENT_TEXT_DETECTION", maxResults: 1 }],
-                imageContext: { languageHints: ["ja"] },
-              },
-            ],
-          }),
+          method:"POST",
+          headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({
+            requests:[{
+              image:{content:base64},
+              features:[{type:"DOCUMENT_TEXT_DETECTION"}],
+              imageContext:{languageHints:["ja"]}
+            }]
+          })
         }
       );
 
-      const data = await visionResponse.json();
-
-      if (!visionResponse.ok) {
-        return json(
-          {
-            ok: false,
-            error: "Google Vision API error",
-            details: data?.error?.message || "",
-          },
-          visionResponse.status,
-          corsHeaders
-        );
+      const data=await r.json();
+      if(!r.ok||data.responses?.[0]?.error){
+        const msg=data.responses?.[0]?.error?.message||data.error?.message||`Vision HTTP ${r.status}`;
+        return Response.json({ok:false,error:msg},{status:502,headers:cors()});
       }
 
-      const response = data.responses?.[0];
+      const text=data.responses?.[0]?.fullTextAnnotation?.text
+        ||data.responses?.[0]?.textAnnotations?.[0]?.description
+        ||"";
 
-      if (response?.error) {
-        return json(
-          { ok: false, error: response.error.message || "OCR error" },
-          500,
-          corsHeaders
-        );
-      }
-
-      const text =
-        response?.fullTextAnnotation?.text ||
-        response?.textAnnotations?.[0]?.description ||
-        "";
-
-      return json({ ok: true, text }, 200, corsHeaders);
-    } catch (error) {
-      return json(
-        { ok: false, error: String(error?.message || error) },
-        500,
-        corsHeaders
-      );
+      return Response.json({ok:true,text},{headers:cors()});
+    }catch(e){
+      return Response.json({ok:false,error:String(e?.message||e)},{status:500,headers:cors()});
     }
-  },
+  }
 };
-
-function json(data, status, headers) {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: {
-      ...headers,
-      "Content-Type": "application/json; charset=utf-8",
-      "Cache-Control": "no-store",
-    },
-  });
-}
