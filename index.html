@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#f5f5f7">
-<title>のぶ帳簿 v32 医療機関名強化版</title>
+<title>のぶ帳簿 v33 医療誤認防止版</title>
 <style>
 :root{font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif;color:#111;background:#f5f5f7}
 *{box-sizing:border-box}
@@ -30,7 +30,7 @@ footer{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(
 </style>
 </head>
 <body>
-<header><h1>のぶ帳簿 <span class="ver">v32・医療機関名強化版</span></h1></header>
+<header><h1>のぶ帳簿 <span class="ver">v33・医療誤認防止版</span></h1></header>
 
 <div class="card">
   <span id="selftest" class="badge">内部テスト中…</span><span class="badge" style="margin-left:6px">PaddleOCR不使用</span><span class="badge" style="margin-left:6px">店名学習ON</span>
@@ -53,7 +53,7 @@ footer{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(
   <p class="small"><b>買い物レシートは、店名・日付・合計金額が全部入るようにレシート全体を撮影してください。</b></p>
   <img id="preview" class="hidden" alt="preview">
   <button id="ocrBtn" class="primary" style="width:100%;margin-top:10px" disabled>OCRして自動入力</button>
-  <div id="status" class="status" style="margin-top:10px">v32医療機関名強化版を読み込みました。</div>
+  <div id="status" class="status" style="margin-top:10px">v33医療誤認防止版を読み込みました。</div>
 </div>
 
 <div id="form-medical" class="card">
@@ -415,17 +415,17 @@ function medicalAmountFromLabels(text){
   const pointValues=extractMedicalPointValues(text);
 
   const labels=[
-    {re:/領収金額/i,score:1800,source:"receipt-amount"},
-    {re:/領収額合計|領収額/i,score:1700,source:"receipt-total"},
-    {re:/一部負担金|患者負担額|自己負担額|窓口負担額/i,score:1600,source:"patient-copay"},
-    {re:/今回請求額|請求額|お支払額|支払額|負担額/i,score:1450,source:"payment"},
-    {re:/合計金額|合計/i,score:1250,source:"total"}
+    {re:/領収金額/i,score:2000,source:"receipt-amount"},
+    {re:/領収額合計|領収額/i,score:1900,source:"receipt-total"},
+    {re:/一部負担金|患者負担額|自己負担額|窓口負担額/i,score:1800,source:"patient-copay"},
+    {re:/今回請求額|請求額|お支払額|支払額|負担額/i,score:1650,source:"payment"},
+    {re:/合計金額/i,score:1500,source:"total"}
   ];
 
-  const forbidden=/(点|点数|診療報酬|保険点数|総点数|請求点数|負担割合|負担上限|上限|電話|TEL|No\.?|番号|登録番号|税率|年月日|単価|回数|数量)/i;
+  const forbidden=/(点|点数|診療報酬|保険点数|総点数|請求点数|負担割合|負担上限|上限|電話|TEL|No\.?|番号|登録番号|税率|年月日|単価|回数|数量|再診料|初診料|処方料|検査|精神科専門療法|投薬|注射|処置)/i;
+
   const candidates=[];
 
-  // Explicit payment labels.
   for(let i=0;i<lines.length;i++){
     const line=lines[i];
     if(forbidden.test(line))continue;
@@ -434,73 +434,68 @@ function medicalAmountFromLabels(text){
       if(!label.re.test(line))continue;
 
       for(const n of amountsInLine(line)){
-        if(n<10 || pointValues.has(n))continue;
+        if(n<10||pointValues.has(n))continue;
         candidates.push({n,score:label.score+250,line,source:label.source+"-same-line"});
       }
 
-      for(let j=i+1;j<=Math.min(i+2,lines.length-1);j++){
+      for(let j=i+1;j<=Math.min(i+1,lines.length-1);j++){
         const target=lines[j];
         if(forbidden.test(target))continue;
         for(const n of amountsInLine(target)){
-          if(n<10 || pointValues.has(n))continue;
-          candidates.push({n,score:label.score-(j-i)*120,line:target,source:label.source+"-nearby"});
+          if(n<10||pointValues.has(n))continue;
+          candidates.push({n,score:label.score-100,line:target,source:label.source+"-nearby"});
         }
       }
     }
   }
 
   candidates.sort((a,b)=>b.score-a.score || b.n-a.n);
-  if(candidates[0] && candidates[0].score>=1100)return candidates[0];
 
-  // Repetition fallback, still excluding known point values.
-  const counts=new Map();
-  for(const line of lines){
-    if(forbidden.test(line))continue;
-    for(const n of amountsInLine(line)){
-      if(n<10 || pointValues.has(n))continue;
-      counts.set(n,(counts.get(n)||0)+1);
-    }
-  }
-
-  for(const [n,count] of counts){
-    if(count>=2){
-      candidates.push({
-        n,
-        score:320+count*80+(n>=100?30:0),
-        line:`repeated x${count}`,
-        source:"single-text-repeat"
-      });
-    }
-  }
-
-  // Currency-marked final fallback only.
-  for(const line of lines){
-    if(forbidden.test(line) || !/[円¥￥]/.test(line))continue;
-    for(const n of amountsInLine(line)){
-      if(n<50 || pointValues.has(n))continue;
-      candidates.push({n,score:200,line,source:"currency-fallback"});
-    }
-  }
-
-  candidates.sort((a,b)=>b.score-a.score || b.n-a.n);
+  // Accuracy-first: if there is no explicit payment label, return null.
   return candidates[0]||null;
 }
 
-function medicalDateFromDocument(text){
-  let d=parseDate(text);
-  if(d)return d;
 
-  const s=normalize(text);
+function medicalReceiptDateFromLabels(text){
+  const lines=String(text||"").split(/\n+/).map(x=>normalize(x.trim())).filter(Boolean);
+  const label=/(領収日|領収年月日|発行日|発行年月日|会計日|支払日|領収済)/;
 
-  // Medical receipts sometimes stamp a Reiwa date as "08.8.10" or "08/8/10"
-  // without printing the era. Treat 01-20 as Reiwa only when receipt context exists.
-  if(/領収|診療|医療|クリニック|医院|病院|歯科|薬局/.test(s)){
-    const matches=[...s.matchAll(/(?:^|[^\d])0?([1-9]|1\d|20)[\/.\-]0?(\d{1,2})[\/.\-]0?(\d{1,2})(?:[^\d]|$)/g)];
-    for(const m of matches){
+  for(let i=0;i<lines.length;i++){
+    if(!label.test(lines[i]))continue;
+    const scope=[lines[i-1]||"",lines[i],lines[i+1]||""].join(" ");
+    const d=parseDate(scope);
+    if(d)return d;
+
+    // Reiwa stamp without explicit era in label context e.g. 08.8.10
+    const m=scope.match(/(?:^|[^\d])0?([1-9]|1\d|20)[\/.\-]0?(\d{1,2})[\/.\-]0?(\d{1,2})(?:[^\d]|$)/);
+    if(m){
       const iso=reiwaToISO(m[1],m[2],m[3]);
       if(iso)return iso;
     }
   }
+  return "";
+}
+
+function medicalDateFromDocument(text){
+  // 1) Receipt/issue/payment labels are authoritative.
+  const labeled=medicalReceiptDateFromLabels(text);
+  if(labeled)return labeled;
+
+  // 2) Otherwise only accept a date if it appears in receipt context,
+  // not a treatment/detail row.
+  const lines=String(text||"").split(/\n+/).map(x=>normalize(x.trim())).filter(Boolean);
+  const detailTerms=/(診療内容|診療明細|精神科専門療法|再診料|初診料|処方|検査|投薬|注射|処置|点数|回数)/;
+  const receiptTerms=/(領収|会計|支払|請求|発行)/;
+
+  for(let i=0;i<lines.length;i++){
+    const scope=[lines[i-1]||"",lines[i],lines[i+1]||""].join(" ");
+    if(detailTerms.test(scope))continue;
+    if(!receiptTerms.test(scope))continue;
+    const d=parseDate(scope);
+    if(d)return d;
+  }
+
+  // 3) No confident receipt date -> blank. Do not guess from medical-detail dates.
   return "";
 }
 
@@ -572,37 +567,31 @@ function parseName(text){
     .map(x=>x.replace(/[|｜]/g,"").replace(/\s+/g," ").trim())
     .filter(Boolean);
 
-  const providerTerms=/(クリニック|病院|医院|診療所|歯科|歯科医院|歯科クリニック|薬局|調剤薬局|メディカルセンター|医療センター|ケアセンター|眼科|内科|外科|皮膚科|耳鼻咽喉科|心療内科|精神科|整形外科|産婦人科|小児科|泌尿器科|脳神経外科|リハビリテーション科)/;
+  const providerTerms=/(クリニック|病院|医院|診療所|歯科|歯科医院|歯科クリニック|薬局|調剤薬局|医療センター|メディカルセンター|眼科医院|耳鼻咽喉科医院|整形外科医院|産婦人科医院)/;
 
-  const bad=/(領収|明細|患者|氏名|年月日|保険|負担|点数|合計|電話|TEL|No\.?|番号|受付|登録番号|住所|郵便|〒|診療報酬|領収済|発行日|発行年月日|コード|請求)/i;
+  // Medical service/procedure names must NEVER be treated as provider names.
+  const procedureTerms=/(精神科専門療法|再診料|初診料|処方料|処方箋料|投薬|検査|画像診断|医学管理|在宅医療|リハビリ|手術|麻酔|注射|処置|放射線|病理診断|入院料|診療明細|診療内容|保険診療|点数)/;
 
-  const addressLike=/(都|道|府|県|市|区|町|村|丁目|番地|番|号)/;
+  const bad=/(領収|明細|患者|氏名|年月日|保険|負担|点数|合計|電話|TEL|No\.?|番号|受付|登録番号|住所|郵便|〒|診療報酬|領収済|発行日|発行年月日|コード|請求|金額|単価|回数|数量)/i;
 
-  const preferred=lines
-    .map(line=>{
-      let score=0;
-      if(providerTerms.test(line))score+=500;
-      if(/(法人|医療法人|社団法人|財団法人)/.test(line))score+=80;
-      if(line.length>=4&&line.length<=30)score+=50;
-      if(/[一-龯ぁ-んァ-ヶ]/.test(line))score+=30;
-      if(bad.test(line))score-=700;
+  const candidates=[];
 
-      // Address-like strings are penalized unless they clearly contain a provider term.
-      if(addressLike.test(line) && !providerTerms.test(line))score-=500;
+  for(const line of lines){
+    if(procedureTerms.test(line))continue;
+    if(bad.test(line))continue;
+    if(!providerTerms.test(line))continue;
+    if((line.match(/\d/g)||[]).length>=4)continue;
 
-      // Long digit-heavy strings are almost certainly not provider names.
-      if((line.match(/\d/g)||[]).length>=4)score-=600;
+    let score=1000;
+    if(/医療法人|社会医療法人|医療法人社団|医療法人財団/.test(line))score+=250;
+    if(/調剤薬局|歯科クリニック|医療センター/.test(line))score+=120;
+    if(line.length>=4&&line.length<=35)score+=50;
 
-      return {line,score};
-    })
-    .filter(x=>x.score>0)
-    .sort((a,b)=>b.score-a.score || a.line.length-b.line.length);
+    candidates.push({line,score});
+  }
 
-  if(preferred.length)return preferred[0].line;
-
-  // Conservative fallback: if no provider-like line exists, leave blank rather than
-  // inventing an address or random OCR fragment as the hospital/clinic name.
-  return "";
+  candidates.sort((a,b)=>b.score-a.score || a.line.length-b.line.length);
+  return candidates[0]?.line||"";
 }
 function parseTax(text){
   const s=normalize(text);
@@ -924,7 +913,7 @@ async function precisionMedicalDocument(file){
 
       // Full-document amount may replace upper only if it is an explicit,
       // very-high-confidence payment label.
-      if(amount && amount.score>=1700 && (!bestAmount || amount.score>bestAmount.score)){
+      if(amount && amount.score>=1800 && (!bestAmount || amount.score>bestAmount.score)){
         bestAmount=amount;
         bestAngle=angle;
       }
@@ -2131,12 +2120,23 @@ TEL 025-000-0000
 新潟市中央区○○1-2-3
 電話 025-111-2222`;
   const ok34=parseName(pharmacyCase)==="みどり調剤薬局";
+  const procNameCase=`精神科専門療法
+再診料
+新潟市中央区笹口1丁目`;
+  const ok35=parseName(procNameCase)==="";
+  const strictAmtCase=`精神科専門療法 315
+診療報酬点数 315点
+再診料 78`;
+  const ok36=medicalAmountFromLabels(strictAmtCase)===null;
+  const strictDateCase=`診療明細
+2026/01/08 精神科専門療法`;
+  const ok37=medicalDateFromDocument(strictDateCase)==="";
 
   currentTab=oldTab;
 
-  const ok=ok1&&ok2&&ok3&&ok4&&ok5&&ok6&&ok7&&ok8&&ok9&&ok10&&ok11&&ok12&&ok13&&ok14&&ok15&&ok16&&ok17&&ok18&&ok19&&ok20&&ok21&&ok22&&ok23&&ok24&&ok25&&ok26&&ok27&&ok28&&ok29&&ok30&&ok31&&ok32&&ok33&&ok34;
+  const ok=ok1&&ok2&&ok3&&ok4&&ok5&&ok6&&ok7&&ok8&&ok9&&ok10&&ok11&&ok12&&ok13&&ok14&&ok15&&ok16&&ok17&&ok18&&ok19&&ok20&&ok21&&ok22&&ok23&&ok24&&ok25&&ok26&&ok27&&ok28&&ok29&&ok30&&ok31&&ok32&&ok33&&ok34&&ok35&&ok36&&ok37;
   const el=$("selftest");
-  el.textContent=ok?"内部抽出テスト：OK（医療機関名＋点数除外）":"内部抽出テスト：要修正";
+  el.textContent=ok?"内部抽出テスト：OK（医療誤認防止）":"内部抽出テスト：要修正";
   if(!ok)el.style.background="#ffecec";
   return ok;
 }
