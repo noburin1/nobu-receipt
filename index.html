@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#f5f5f7">
-<title>のぶ帳簿 v36 確認済み学習版</title>
+<title>のぶ帳簿 v37 医療会計欄照合版</title>
 <style>
 :root{font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif;color:#111;background:#f5f5f7}
 *{box-sizing:border-box}
@@ -30,7 +30,7 @@ footer{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(
 </style>
 </head>
 <body>
-<header><h1>のぶ帳簿 <span class="ver">v36・確認済み学習版</span></h1></header>
+<header><h1>のぶ帳簿 <span class="ver">v37・医療会計欄照合版</span></h1></header>
 
 <div class="card">
   <span id="selftest" class="badge">内部テスト中…</span><span class="badge" style="margin-left:6px">PaddleOCR不使用</span><span class="badge" style="margin-left:6px">店名学習ON</span>
@@ -53,7 +53,7 @@ footer{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(
   <p class="small"><b>買い物レシートは、店名・日付・合計金額が全部入るようにレシート全体を撮影してください。</b></p>
   <img id="preview" class="hidden" alt="preview">
   <button id="ocrBtn" class="primary" style="width:100%;margin-top:10px" disabled>OCRして自動入力</button>
-  <div id="status" class="status" style="margin-top:10px">v36確認済み学習版を読み込みました。ユーザーが保存した値だけを正解として学習します。</div>
+  <div id="status" class="status" style="margin-top:10px">v37医療会計欄照合版を読み込みました。上部会計欄だけで金額を照合します。</div>
 </div>
 
 <div id="form-medical" class="card">
@@ -1228,12 +1228,102 @@ async function precisionMedicalReceiptDate(file){
   return null;
 }
 
+
+function pickMedicalAccountingValue(nums){
+  const counts=new Map();
+  for(const n of nums){
+    const x=Number(n);
+    if(!Number.isFinite(x)||x<50||x>9999999)continue;
+    counts.set(x,(counts.get(x)||0)+1);
+  }
+
+  const ranked=[...counts.entries()]
+    .filter(([,count])=>count>=2)
+    .map(([n,count])=>({
+      n,count,
+      score:count*300 + (n>=100?60:0)
+    }))
+    .sort((a,b)=>b.score-a.score || b.n-a.n);
+
+  return ranked[0]||null;
+}
+
+async function precisionMedicalAccountingZone(file){
+  // Only inspect the upper accounting/receipt-summary area.
+  // The treatment-detail table below is intentionally excluded.
+  const angles=[0,90,-90];
+  const zones=[
+    [0.00,0.00,1.00,0.30],
+    [0.00,0.00,1.00,0.36],
+    [0.00,0.08,1.00,0.40]
+  ];
+
+  let best=null;
+
+  for(const angle of angles){
+    const oriented=await makeCanvas(file,"full",angle);
+
+    for(let zi=0;zi<zones.length;zi++){
+      setStatus(`医療会計欄の金額を照合中… ${angle}° ${zi+1}/${zones.length}`);
+      const z=zones[zi];
+      const part=cropCanvas(oriented,z[0],z[1],z[2],z[3],2.2);
+
+      // Text pass identifies point values / labels.
+      await restoreTextOCR();
+      const w=await ensureWorker();
+      await w.setParameters({
+        tessedit_char_whitelist:"",
+        tessedit_pageseg_mode:Tesseract.PSM.SPARSE_TEXT,
+        preserve_interword_spaces:"1"
+      });
+      const tr=await w.recognize(part,{rotateAuto:false});
+      const raw=tr.data.text||"";
+      const pointValues=extractMedicalPointValues(raw);
+      const labeled=medicalAmountFromLabels(raw);
+
+      // Digit-only pass gives more reliable numerals in form/table cells.
+      const digitRaw=await recognizeDigits(part);
+      const nums=numbersOnly(digitRaw).filter(n=>!pointValues.has(n));
+      const repeated=pickMedicalAccountingValue(nums);
+
+      let cand=null;
+
+      if(labeled && labeled.score>=1800){
+        cand={
+          amount:labeled.n,
+          score:2200,
+          source:"accounting-explicit-label",
+          text:raw+"\n--- digits ---\n"+digitRaw,
+          angle
+        };
+      }else if(repeated){
+        cand={
+          amount:repeated.n,
+          score:1500+repeated.score,
+          source:"accounting-upper-repeat",
+          text:raw+"\n--- digits ---\n"+digitRaw,
+          angle
+        };
+      }
+
+      if(cand && (!best || cand.score>best.score))best=cand;
+    }
+  }
+
+  await restoreTextOCR();
+  return best;
+}
+
 async function precisionMedicalReceiptAmount(file){
+  // 1) Strongest generic signal: repeated/labelled value in upper accounting area.
+  const accounting=await precisionMedicalAccountingZone(file);
+  if(accounting)return accounting;
+
+  // 2) Fallback: explicit payment labels in somewhat larger upper area.
   const angles=[0,90,-90];
   const zones=[
     [0.00,0.00,1.00,0.42],
-    [0.00,0.00,1.00,0.58],
-    [0.00,0.15,1.00,0.65]
+    [0.00,0.00,1.00,0.52]
   ];
 
   await restoreTextOCR();
@@ -1246,7 +1336,7 @@ async function precisionMedicalReceiptAmount(file){
     for(let zi=0;zi<zones.length;zi++){
       setStatus(`領収金額・負担額を確認中… ${angle}° ${zi+1}/${zones.length}`);
       const z=zones[zi];
-      const part=cropCanvas(oriented,z[0],z[1],z[2],z[3],zi===0?2.1:1.8);
+      const part=cropCanvas(oriented,z[0],z[1],z[2],z[3],2.0);
 
       await w.setParameters({
         tessedit_char_whitelist:"",
@@ -1257,20 +1347,21 @@ async function precisionMedicalReceiptAmount(file){
       const raw=r.data.text||"";
       const amount=medicalAmountFromLabels(raw);
 
-      if(amount && (!best || amount.score>best.score)){
-        best={amount:amount.n,score:amount.score,text:raw,angle,source:amount.source};
-      }
-
-      // Explicit 領収金額 / 領収額 is strong enough to stop.
-      if(best && /^receipt-/.test(best.source) && best.score>=1800){
-        await restoreTextOCR();
-        return best;
+      if(amount && amount.score>=1800){
+        const cand={
+          amount:amount.n,
+          score:amount.score,
+          text:raw,
+          angle,
+          source:amount.source
+        };
+        if(!best || cand.score>best.score)best=cand;
       }
     }
   }
 
   await restoreTextOCR();
-  return best && best.score>=1500 ? best : null;
+  return best;
 }
 
 async function precisionMedicalDocument(file){
@@ -2554,12 +2645,15 @@ TEL 025-000-0000
   const ok41=seedShop.examples[0].amount===5126;
   const ok42=seedMed.reject_tokens.includes("点数");
   const ok43=RECEIPT_LEARNING_SEEDS.providers["大通り歯科"].examples[0].confirmed===true;
+  const ok44=pickMedicalAccountingValue([461,920,920,315,78,60])?.n===920;
+  const ok45=pickMedicalAccountingValue([920,920,920,315,315])?.n===920;
+  const ok46=pickMedicalAccountingValue([315,78,60])===null;
 
   currentTab=oldTab;
 
-  const ok=ok1&&ok2&&ok3&&ok4&&ok5&&ok6&&ok7&&ok8&&ok9&&ok10&&ok11&&ok12&&ok13&&ok14&&ok15&&ok16&&ok17&&ok18&&ok19&&ok20&&ok21&&ok22&&ok23&&ok24&&ok25&&ok26&&ok27&&ok28&&ok29&&ok30&&ok31&&ok32&&ok33&&ok34&&ok35&&ok36&&ok37&&ok38&&ok39&&ok40&&ok41&&ok42&&ok43;
+  const ok=ok1&&ok2&&ok3&&ok4&&ok5&&ok6&&ok7&&ok8&&ok9&&ok10&&ok11&&ok12&&ok13&&ok14&&ok15&&ok16&&ok17&&ok18&&ok19&&ok20&&ok21&&ok22&&ok23&&ok24&&ok25&&ok26&&ok27&&ok28&&ok29&&ok30&&ok31&&ok32&&ok33&&ok34&&ok35&&ok36&&ok37&&ok38&&ok39&&ok40&&ok41&&ok42&&ok43&&ok44&&ok45&&ok46;
   const el=$("selftest");
-  el.textContent=ok?"内部抽出テスト：OK（確認済み学習のみ）":"内部抽出テスト：要修正";
+  el.textContent=ok?"内部抽出テスト：OK（確認済み学習＋医療会計欄照合）":"内部抽出テスト：要修正";
   if(!ok)el.style.background="#ffecec";
   return ok;
 }
