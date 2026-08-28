@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#f5f5f7">
-<title>のぶ帳簿 v22 ロゴ漢字強化版</title>
+<title>のぶ帳簿 v23 店名学習版</title>
 <style>
 :root{font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif;color:#111;background:#f5f5f7}
 *{box-sizing:border-box}
@@ -30,10 +30,10 @@ footer{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(
 </style>
 </head>
 <body>
-<header><h1>のぶ帳簿 <span class="ver">v22・ロゴ漢字強化版</span></h1></header>
+<header><h1>のぶ帳簿 <span class="ver">v23・店名学習版</span></h1></header>
 
 <div class="card">
-  <span id="selftest" class="badge">内部テスト中…</span><span class="badge" style="margin-left:6px">PaddleOCR不使用</span>
+  <span id="selftest" class="badge">内部テスト中…</span><span class="badge" style="margin-left:6px">PaddleOCR不使用</span><span class="badge" style="margin-left:6px">店名学習ON</span>
   <p class="small">無料・APIキー不要。OCR画像は外部APIへ送信せず、Safari内で処理します。初回のみOCRライブラリ/日本語データをCDNから取得します。</p>
 </div>
 
@@ -53,7 +53,7 @@ footer{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(
   <p class="small"><b>買い物レシートは、店名・日付・合計金額が全部入るようにレシート全体を撮影してください。</b></p>
   <img id="preview" class="hidden" alt="preview">
   <button id="ocrBtn" class="primary" style="width:100%;margin-top:10px" disabled>OCRして自動入力</button>
-  <div id="status" class="status" style="margin-top:10px">v22安定版を読み込みました。レシート全体を撮影してください。</div>
+  <div id="status" class="status" style="margin-top:10px">v23安定版を読み込みました。店名は一度確定すると次回から学習補完します。</div>
 </div>
 
 <div id="form-medical" class="card">
@@ -126,6 +126,84 @@ footer{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(
 })();
 
 const KEY="nobu-receipt-v3";
+
+const STORE_DICT_KEY="nobu-store-dictionary-v1";
+
+// Seed only where the receipt itself gives a strong identifier such as a phone number.
+// Future stores are learned locally when the user saves a confirmed store name.
+const STORE_SEEDS={
+  "0252505700":"小嶋屋総本店 亀田インター店"
+};
+
+function loadStoreDictionary(){
+  try{
+    return JSON.parse(localStorage.getItem(STORE_DICT_KEY)||"{}");
+  }catch(_){
+    return {};
+  }
+}
+let storeDictionary=loadStoreDictionary();
+
+function normalizePhone(s){
+  return String(s||"").replace(/[^\d]/g,"");
+}
+function extractPhones(text){
+  const raw=String(text||"");
+  const found=new Set();
+
+  // Hyphenated Japanese phone numbers
+  for(const m of raw.matchAll(/0\d{1,4}[-ー−]\d{1,4}[-ー−]\d{3,4}/g)){
+    const p=normalizePhone(m[0]);
+    if(p.length>=9&&p.length<=11)found.add(p);
+  }
+
+  // OCR sometimes drops hyphens. Accept 10-11 digit strings beginning with 0.
+  for(const m of raw.matchAll(/(?:^|[^\d])(0\d{9,10})(?:[^\d]|$)/g)){
+    const p=m[1];
+    if(p.length>=10&&p.length<=11)found.add(p);
+  }
+
+  return [...found];
+}
+
+function learnedStoreFromText(text){
+  const phones=extractPhones(text);
+
+  for(const p of phones){
+    if(storeDictionary[p])return {name:storeDictionary[p],key:p,source:"learned-phone"};
+    if(STORE_SEEDS[p])return {name:STORE_SEEDS[p],key:p,source:"seed-phone"};
+  }
+
+  // Branch fallback for this already-confirmed receipt pattern.
+  // A phone match is preferred; this is only a secondary local rule.
+  if(/亀田インター店/.test(text)){
+    return {name:"小嶋屋総本店 亀田インター店",key:"branch:亀田インター店",source:"branch"};
+  }
+
+  return null;
+}
+
+function learnStoreName(text,confirmedName){
+  const name=String(confirmedName||"").trim();
+  if(!name)return;
+
+  const phones=extractPhones(text);
+  let changed=false;
+
+  for(const p of phones){
+    if(storeDictionary[p]!==name){
+      storeDictionary[p]=name;
+      changed=true;
+    }
+  }
+
+  if(changed){
+    try{
+      localStorage.setItem(STORE_DICT_KEY,JSON.stringify(storeDictionary));
+    }catch(_){}
+  }
+}
+
 const TESS_URL="https://cdn.jsdelivr.net/npm/tesseract.js@7.0.0/dist/tesseract.min.js";
 let db=JSON.parse(localStorage.getItem(KEY)||"[]");
 let currentFile=null,currentTab="medical",worker=null,loadPromise=null;
@@ -1192,6 +1270,14 @@ $("ocrBtn").onclick=async()=>{
           if(ph.date)$("s-date").value=ph.date;
         }
 
+        // Semantic/learned store identity beats stylized-logo OCR.
+        const learned=learnedStoreFromText(combined);
+        if(learned){
+          $("s-name").value=learned.name;
+          combined += `\n--- 店名学習補完 ---\n${learned.source}: ${learned.name}`;
+          $("raw").value=combined;
+        }
+
         const pa=await precisionShoppingAmount(currentFile,combined);
         if(pa){
           combined += "\n--- 合計金額精密OCR ---\n"+pa.text;
@@ -1247,6 +1333,15 @@ $("saveShopping").onclick=()=>{
     $("s-amount").focus();
     return;
   }
+  if(!name){
+    setStatus("店名が空欄です。店名を確認してから保存してください。一度保存した店は電話番号と一緒に端末内へ学習します。","err");
+    $("s-name").focus();
+    return;
+  }
+
+  // Learn the user's confirmed store name locally for future receipts.
+  learnStoreName($("raw").value,name);
+
   add("shopping",{name,date,amount,ocr:$("raw").value});
 };
 $("saveTax").onclick=()=>add("tax",{name:$("t-name").value.trim(),year:$("t-year").value,payment:Number($("t-payment").value||0),tax:Number($("t-tax").value||0),ocr:$("raw").value});
@@ -1335,12 +1430,18 @@ function runSelfTest(){
 (領収証対象金額 ¥5,126)`;
   const ok14=shoppingTotalFromLabel(tenderCase).amount===5126;
   const ok15=safeShoppingAmount(tenderCase)===5126;
+  const learnedTest=`小嶋屋
+亀田インター店
+025-250-5700
+2026/08/25 13:42`;
+  const ok16=learnedStoreFromText(learnedTest).name==="小嶋屋総本店 亀田インター店";
+  const ok17=extractPhones(learnedTest)[0]==="0252505700";
 
   currentTab=oldTab;
 
-  const ok=ok1&&ok2&&ok3&&ok4&&ok5&&ok6&&ok7&&ok8&&ok9&&ok10&&ok11&&ok12&&ok13&&ok14&&ok15;
+  const ok=ok1&&ok2&&ok3&&ok4&&ok5&&ok6&&ok7&&ok8&&ok9&&ok10&&ok11&&ok12&&ok13&&ok14&&ok15&&ok16&&ok17;
   const el=$("selftest");
-  el.textContent=ok?"内部抽出テスト：OK（合計＋ロゴ漢字）":"内部抽出テスト：要修正";
+  el.textContent=ok?"内部抽出テスト：OK（合計＋店名学習）":"内部抽出テスト：要修正";
   if(!ok)el.style.background="#ffecec";
   return ok;
 }
