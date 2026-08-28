@@ -53,7 +53,7 @@ footer .inner{max-width:760px;margin:auto;display:flex;gap:10px}footer button{fl
   </div>
   <img id="preview" alt="preview">
   <button id="ocrBtn" class="primary" style="width:100%;margin-top:10px">OCRして自動入力</button>
-  <div id="status" class="status">写真を選んでください。カメラは青い「カメラで撮影」または下部の「レシート撮影」を直接タップしてください。初回OCRのみモデル読み込みがあります。</div>
+  <div id="status" class="status">写真を選んでください。撮影後に「OCRして自動入力」を押してください。初回だけOCRエンジンと日本語モデルの読み込みがあります。</div>
 </div>
 
 <div class="card">
@@ -97,8 +97,6 @@ footer .inner{max-width:760px;margin:auto;display:flex;gap:10px}footer button{fl
 </div></footer>
 
 <script type="module">
-import { PaddleOCR } from "https://esm.sh/@paddleocr/paddleocr-js@latest?bundle";
-
 const STORAGE_KEY="nobu-receipt-v3";
 let type="shopping",sourceFile=null,lastOcr="",ocrEngine=null;
 const $=id=>document.getElementById(id);
@@ -110,20 +108,28 @@ function store(v){localStorage.setItem(STORAGE_KEY,JSON.stringify(v))}
 function setStatus(msg,kind=""){const e=$("status");e.textContent=msg;e.className="status "+kind}
 function isoDate(y,m,d){return `${y}-${String(m).padStart(2,"0")}-${String(d).padStart(2,"0")}`}
 
+let PaddleOCRClass=null;
 async function getEngine(){
   if(ocrEngine)return ocrEngine;
-  setStatus("無料OCRモデルを読み込み中…\n初回だけ少し時間がかかります。");
-  ocrEngine=await PaddleOCR.create({
-    lang:"japan",
-    ocrVersion:"PP-OCRv5",
-    ortOptions:{
-      backend:"wasm",
-      wasmPaths:"https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/",
-      numThreads:1,
-      simd:true
+  setStatus("OCRエンジンを読み込み中…\nこの表示が動いている間は処理中です。");
+  try{
+    if(!PaddleOCRClass){
+      const mod=await import("https://esm.sh/@paddleocr/paddleocr-js@0.4.2?bundle");
+      PaddleOCRClass=mod.PaddleOCR;
+      if(!PaddleOCRClass)throw new Error("PaddleOCR module could not be loaded");
     }
-  });
-  return ocrEngine;
+    setStatus("日本語OCRモデルを初期化中…\n初回のみモデルを取得します。");
+    ocrEngine=await PaddleOCRClass.create({
+      lang:"japan",
+      ocrVersion:"PP-OCRv5",
+      ortOptions:{backend:"auto"}
+    });
+    setStatus("OCRエンジン準備完了。画像を解析します。","good");
+    return ocrEngine;
+  }catch(e){
+    ocrEngine=null;
+    throw new Error("OCRエンジン初期化失敗: "+String(e?.message||e));
+  }
 }
 
 async function fileToImage(file){
@@ -170,26 +176,40 @@ function orientationScore(text){
 
 async function runOCR(file){
   const engine=await getEngine();
-  const img=await fileToImage(file);
-  const candidates=[0,90,270,180];
-  let best={text:"",score:-1,deg:0};
-  for(let i=0;i<candidates.length;i++){
-    const deg=candidates[i];
-    setStatus(`OCR中… 自動向き判定 ${i+1}/${candidates.length}`);
-    const canvas=makeCanvas(img,deg);
-    const [result]=await engine.predict(canvas,{
-      textDetLimitSideLen:960,
-      textDetMaxSideLimit:1600,
-      textRecScoreThresh:0.35
-    });
-    const text=textFromResult(result),score=orientationScore(text);
-    if(score>best.score)best={text,score,deg};
-    if(score>=42 && /[円￥¥]|合計|領収|支払/.test(text))break;
-    await new Promise(r=>setTimeout(r,30));
+
+  // First pass: official SDK path — pass the original File/Blob directly.
+  setStatus("OCR解析中… 1/2\\n写真全体を読み取っています。");
+  let [result]=await engine.predict(file,{
+    textDetLimitSideLen:960,
+    textDetMaxSideLimit:1600,
+    textRecScoreThresh:0.30
+  });
+  let text=textFromResult(result);
+
+  if(text && orientationScore(text)>=25){
+    return {text,score:orientationScore(text),deg:0};
   }
-  URL.revokeObjectURL(img.src);
-  if(!best.text.trim())throw new Error("文字を読み取れませんでした。写真を近づけて撮影してください。");
-  return best;
+
+  // Fallback only when the direct pass is weak: rotate once to handle sideways iPhone photos.
+  setStatus("OCR解析中… 2/2\\n写真の向きを補正して再解析しています。");
+  const img=await fileToImage(file);
+  try{
+    let best={text:text||"",score:orientationScore(text||""),deg:0};
+    for(const deg of [90,270]){
+      const canvas=makeCanvas(img,deg);
+      const [r]=await engine.predict(canvas,{
+        textDetLimitSideLen:960,
+        textDetMaxSideLimit:1600,
+        textRecScoreThresh:0.30
+      });
+      const t=textFromResult(r),s=orientationScore(t);
+      if(s>best.score)best={text:t,score:s,deg};
+    }
+    if(!best.text.trim())throw new Error("文字を読み取れませんでした。レシートを画面いっぱいに撮影してください。");
+    return best;
+  }finally{
+    try{URL.revokeObjectURL(img.src)}catch{}
+  }
 }
 
 function parseDate(t){
@@ -258,6 +278,7 @@ $("cameraFooterInput").addEventListener("change",e=>handleSelectedFile(e.target.
 $("ocrBtn").onclick=async()=>{
   if(!sourceFile){setStatus("先に写真を選んでください。","bad");return}
   $("ocrBtn").disabled=true;
+  $("ocrBtn").textContent="OCR処理中…";
   try{
     const best=await runOCR(sourceFile);
     const text=best.text;lastOcr=text;$("ocrText").textContent=text;
@@ -268,7 +289,10 @@ $("ocrBtn").onclick=async()=>{
     setStatus(`OCR完了（自動回転 ${best.deg}°）。内容を確認して保存してください。`,"good");
   }catch(e){
     setStatus("OCR失敗: "+String(e?.message||e),"bad");
-  }finally{$("ocrBtn").disabled=false}
+  }finally{
+    $("ocrBtn").disabled=false;
+    $("ocrBtn").textContent="OCRして自動入力";
+  }
 };
 
 document.querySelectorAll(".tab").forEach(b=>b.onclick=()=>{
@@ -314,6 +338,6 @@ $("exportBtn").onclick=()=>{
 };
 
 render();
-if("serviceWorker"in navigator)navigator.serviceWorker.register("./sw.js?v=10").catch(()=>{});
+if("serviceWorker"in navigator)navigator.serviceWorker.register("./sw.js?v=11").catch(()=>{});
 </script>
 </body></html>
