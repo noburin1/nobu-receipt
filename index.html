@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#f5f5f7">
-<title>のぶ帳簿 v24 会計整合判定版</title>
+<title>のぶ帳簿 v25 数値会計検算版</title>
 <style>
 :root{font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif;color:#111;background:#f5f5f7}
 *{box-sizing:border-box}
@@ -30,7 +30,7 @@ footer{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(
 </style>
 </head>
 <body>
-<header><h1>のぶ帳簿 <span class="ver">v24・会計整合判定版</span></h1></header>
+<header><h1>のぶ帳簿 <span class="ver">v25・数値会計検算版</span></h1></header>
 
 <div class="card">
   <span id="selftest" class="badge">内部テスト中…</span><span class="badge" style="margin-left:6px">PaddleOCR不使用</span><span class="badge" style="margin-left:6px">店名学習ON</span>
@@ -53,7 +53,7 @@ footer{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(
   <p class="small"><b>買い物レシートは、店名・日付・合計金額が全部入るようにレシート全体を撮影してください。</b></p>
   <img id="preview" class="hidden" alt="preview">
   <button id="ocrBtn" class="primary" style="width:100%;margin-top:10px" disabled>OCRして自動入力</button>
-  <div id="status" class="status" style="margin-top:10px">v24安定版を読み込みました。合計は「預り−お釣り」でも照合します。</div>
+  <div id="status" class="status" style="margin-top:10px">v25安定版を読み込みました。合計は数字だけでも会計式を検算します。</div>
 </div>
 
 <div id="form-medical" class="card">
@@ -771,6 +771,125 @@ function countNumberOccurrences(text,n){
   return (normalize(text).match(loose)||[]).length;
 }
 
+
+function uniqSortedNumbers(nums){
+  return [...new Set(
+    nums
+      .map(Number)
+      .filter(n=>Number.isFinite(n)&&n>=50&&n<=9999999)
+  )].sort((a,b)=>a-b);
+}
+
+function findAccountingEquation(nums){
+  const arr=uniqSortedNumbers(nums);
+  const set=new Set(arr);
+  const candidates=[];
+
+  // Find tender - change = total.
+  // Prefer a large round tender, smaller change, and a plausible total.
+  for(const tender of arr){
+    if(tender<500)continue;
+
+    for(const change of arr){
+      if(change<=0 || change>=tender)continue;
+
+      const total=tender-change;
+      if(total<50 || total>9999999)continue;
+
+      let score=0;
+
+      // Strong evidence when the computed total itself was OCR-read.
+      if(set.has(total))score+=500;
+
+      // Cash tender is often a round denomination.
+      if(tender%1000===0)score+=180;
+      else if(tender%500===0)score+=120;
+      else if(tender%100===0)score+=50;
+
+      // Change is normally less than tender.
+      if(change<tender)score+=40;
+
+      // Retail totals are usually not rounder than the tender.
+      if(total%1000!==0)score+=25;
+
+      // Prefer tender among the largest detected numbers.
+      if(tender===arr[arr.length-1])score+=80;
+
+      candidates.push({tender,change,total,score});
+    }
+  }
+
+  candidates.sort((a,b)=>b.score-a.score || a.total-b.total);
+  const best=candidates[0];
+
+  // Require meaningful evidence so random item-price subtraction is not accepted.
+  if(!best || best.score<300)return null;
+  return best;
+}
+
+async function precisionShoppingArithmetic(file){
+  // Digit-only OCR over the lower/middle receipt area.
+  // Use non-overlapping-ish regions so the same physical number is not counted
+  // repeatedly as "evidence" merely because of crop overlap.
+  const angles=[0,90,-90];
+  const zones=[
+    [0.00,0.32,1.00,0.68],
+    [0.00,0.58,1.00,0.92],
+    [0.08,0.40,0.92,0.88]
+  ];
+
+  let best=null;
+
+  for(const angle of angles){
+    const oriented=await makeCanvas(file,"full",angle);
+    const allNums=[];
+
+    for(let zi=0;zi<zones.length;zi++){
+      setStatus(`数字だけで会計検算中… ${angle}° ${zi+1}/${zones.length}`);
+      const z=zones[zi];
+      const part=cropCanvas(oriented,z[0],z[1],z[2],z[3],1.8);
+      const raw=await recognizeDigits(part);
+      const nums=numbersOnly(raw);
+
+      // Include each value at most once per crop to reduce duplicate-crop bias.
+      allNums.push(...new Set(nums));
+    }
+
+    const eq=findAccountingEquation(allNums);
+    if(eq){
+      const cand={...eq,angle,numbers:uniqSortedNumbers(allNums)};
+      if(!best || cand.score>best.score)best=cand;
+    }
+  }
+
+  await restoreTextOCR();
+  return best;
+}
+
+function chooseShoppingAmountFinal(text,semanticCandidate,arithmeticCandidate){
+  // 1) Explicit "合計" label remains strongest when it is plausible.
+  const label=shoppingTotalFromLabel(text);
+  if(label && label.amount>=50){
+    // If arithmetic independently agrees, confidence is maximal.
+    if(arithmeticCandidate && arithmeticCandidate.total===label.amount){
+      return {amount:label.amount,source:"label+arithmetic",confidence:1600};
+    }
+    return {amount:label.amount,source:"label",confidence:1200};
+  }
+
+  // 2) Numeric accounting identity is next.
+  if(arithmeticCandidate){
+    return {amount:arithmeticCandidate.total,source:"arithmetic",confidence:1100};
+  }
+
+  // 3) Existing semantic candidate only after those.
+  if(semanticCandidate && semanticCandidate.amount>=50){
+    return {amount:semanticCandidate.amount,source:"semantic-fallback",confidence:700};
+  }
+
+  return null;
+}
+
 function resolveShoppingAmountAccounting(text){
   const raw=String(text||"");
 
@@ -992,19 +1111,27 @@ async function precisionShoppingAmountByVotes(file){
 }
 
 async function precisionShoppingAmount(file,baseText=""){
-  // 0) Resolve from already-read OCR text using receipt/accounting semantics.
-  const accounting=resolveShoppingAmountAccounting(baseText);
-  if(accounting && accounting.confidence>=900){
+  // A) Semantic pass from the already-recognized text.
+  const semantic=resolveShoppingAmountAccounting(baseText);
+
+  // B) Independent digit-only accounting pass.
+  const arithmetic=await precisionShoppingArithmetic(file);
+
+  // C) If either gives a strong answer, choose using fixed precedence.
+  const chosen=chooseShoppingAmountFinal(baseText,semantic,arithmetic);
+  if(chosen){
     return {
-      amount:accounting.amount,
-      score:accounting.confidence,
-      text:`accounting resolver: ${accounting.source}`,
-      angle:0,
-      source:accounting.source
+      amount:chosen.amount,
+      score:chosen.confidence,
+      text:arithmetic
+        ? `arithmetic: ${arithmetic.tender} - ${arithmetic.change} = ${arithmetic.total}`
+        : `semantic: ${semantic?.source||"label"}`,
+      angle:arithmetic?.angle||0,
+      source:chosen.source
     };
   }
 
-  // 1) Dedicated OCR for the amount area, then run the same accounting resolver.
+  // D) Dedicated label OCR fallback.
   const angles=[0,90,-90];
   const zones=[
     [0.00,0.20,1.00,0.88],
@@ -1020,7 +1147,7 @@ async function precisionShoppingAmount(file,baseText=""){
     const oriented=await makeCanvas(file,"full",angle);
 
     for(let zi=0;zi<zones.length;zi++){
-      setStatus(`合計・預り・お釣りを照合中… ${angle}° ${zi+1}/${zones.length}`);
+      setStatus(`「合計」欄を補助OCR中… ${angle}° ${zi+1}/${zones.length}`);
       const z=zones[zi];
       const part=cropCanvas(oriented,z[0],z[1],z[2],z[3],zi===2?1.2:1.9);
 
@@ -1032,42 +1159,23 @@ async function precisionShoppingAmount(file,baseText=""){
 
       const r=await w.recognize(part,{rotateAuto:false});
       const raw=r.data.text||"";
-      const resolved=resolveShoppingAmountAccounting(raw);
+      const sem=resolveShoppingAmountAccounting(raw);
 
-      if(resolved){
+      if(sem){
         const candidate={
-          amount:resolved.amount,
-          score:resolved.confidence,
+          amount:sem.amount,
+          score:sem.confidence,
           text:raw,
           angle,
-          source:resolved.source
+          source:sem.source
         };
         if(!best || candidate.score>best.score)best=candidate;
-        if(candidate.score>=1100){
-          await restoreTextOCR();
-          return candidate;
-        }
       }
     }
   }
 
   await restoreTextOCR();
-
-  if(best)return best;
-
-  // 2) Only as a last fallback use the old semantic label parser.
-  const sem=shoppingTotalFromLabel(baseText);
-  if(sem){
-    return {
-      amount:sem.amount,
-      score:sem.confidence,
-      text:sem.line,
-      angle:0,
-      source:"fallback-total-label"
-    };
-  }
-
-  return null;
+  return best;
 }
 
 
@@ -1366,9 +1474,9 @@ $("ocrBtn").onclick=async()=>{
           combined += "\n--- 合計金額精密OCR ---\n"+pa.text;
           $("raw").value=combined;
 
-          // Final authority: run accounting consistency on ALL OCR text.
-          const finalAmount=resolveShoppingAmountAccounting(combined);
-          $("s-amount").value=(finalAmount?.amount)||pa.amount;
+          // pa is already the final result after label + arithmetic validation.
+          // Do NOT re-parse here; that previously caused regressions.
+          $("s-amount").value=pa.amount;
         }
       }
 
@@ -1527,12 +1635,15 @@ function runSelfTest(){
 (領収証対象金額 ¥5,126)`;
   const ok18=resolveShoppingAmountAccounting(accountingCase).amount===5126;
   const ok19=resolveShoppingAmountAccounting(accountingCase).source==="total-label";
+  const eq=findAccountingEquation([1738,1903,1485,5126,466,10000,4874]);
+  const ok20=eq.total===5126 && eq.tender===10000 && eq.change===4874;
+  const ok21=chooseShoppingAmountFinal("",null,eq).amount===5126;
 
   currentTab=oldTab;
 
-  const ok=ok1&&ok2&&ok3&&ok4&&ok5&&ok6&&ok7&&ok8&&ok9&&ok10&&ok11&&ok12&&ok13&&ok14&&ok15&&ok16&&ok17&&ok18&&ok19;
+  const ok=ok1&&ok2&&ok3&&ok4&&ok5&&ok6&&ok7&&ok8&&ok9&&ok10&&ok11&&ok12&&ok13&&ok14&&ok15&&ok16&&ok17&&ok18&&ok19&&ok20&&ok21;
   const el=$("selftest");
-  el.textContent=ok?"内部抽出テスト：OK（店名学習＋会計整合）":"内部抽出テスト：要修正";
+  el.textContent=ok?"内部抽出テスト：OK（店名学習＋数値会計検算）":"内部抽出テスト：要修正";
   if(!ok)el.style.background="#ffecec";
   return ok;
 }
