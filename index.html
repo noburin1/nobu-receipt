@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#f5f5f7">
-<title>のぶ帳簿 v28 医療費汎用OCR版</title>
+<title>のぶ帳簿 v29 領収金額最優先版</title>
 <style>
 :root{font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif;color:#111;background:#f5f5f7}
 *{box-sizing:border-box}
@@ -30,7 +30,7 @@ footer{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(
 </style>
 </head>
 <body>
-<header><h1>のぶ帳簿 <span class="ver">v28・医療費汎用OCR版</span></h1></header>
+<header><h1>のぶ帳簿 <span class="ver">v29・領収金額最優先版</span></h1></header>
 
 <div class="card">
   <span id="selftest" class="badge">内部テスト中…</span><span class="badge" style="margin-left:6px">PaddleOCR不使用</span><span class="badge" style="margin-left:6px">店名学習ON</span>
@@ -53,7 +53,7 @@ footer{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(
   <p class="small"><b>買い物レシートは、店名・日付・合計金額が全部入るようにレシート全体を撮影してください。</b></p>
   <img id="preview" class="hidden" alt="preview">
   <button id="ocrBtn" class="primary" style="width:100%;margin-top:10px" disabled>OCRして自動入力</button>
-  <div id="status" class="status" style="margin-top:10px">v28医療費汎用OCR版を読み込みました。</div>
+  <div id="status" class="status" style="margin-top:10px">v29領収金額最優先版を読み込みました。</div>
 </div>
 
 <div id="form-medical" class="card">
@@ -385,33 +385,61 @@ function isWeakAmountLabel(s){
 
 function medicalAmountFromLabels(text){
   const lines=String(text||"").split(/\n+/).map(x=>normalize(x.trim())).filter(Boolean);
-  const strong=/(領収金額|領収額|今回請求額|請求額|患者負担額|自己負担額|窓口負担額|一部負担金|負担金|お支払額|支払額|合計金額|合計)/i;
-  const forbidden=/(点|負担割合|負担上限|上限|保険点数|診療報酬|電話|TEL|No\.?|番号|登録番号|税率|領収済|年月日)/i;
 
+  // Explicit payment labels, ordered by confidence.
+  // "領収金額" is the strongest signal and must beat repeated detail amounts.
+  const labels=[
+    {re:/領収金額/i,score:1600,source:"receipt-amount"},
+    {re:/領収額合計|領収額/i,score:1500,source:"receipt-total"},
+    {re:/一部負担金|患者負担額|自己負担額|窓口負担額/i,score:1400,source:"patient-copay"},
+    {re:/今回請求額|請求額|お支払額|支払額|負担額/i,score:1250,source:"payment"},
+    {re:/合計金額|合計/i,score:1100,source:"total"}
+  ];
+
+  const forbidden=/(点|負担割合|負担上限|上限|保険点数|診療報酬|電話|TEL|No\.?|番号|登録番号|税率|年月日|単価|回数|数量)/i;
   const candidates=[];
 
+  // 1) Labeled amounts always win over repeated detail rows.
   for(let i=0;i<lines.length;i++){
     const line=lines[i];
-    if(!strong.test(line) || forbidden.test(line))continue;
+    if(forbidden.test(line))continue;
 
-    // Same line is strongest.
-    for(const n of amountsInLine(line)){
-      if(n<10)continue;
-      candidates.push({n,score:500,line,source:"same-line-label"});
-    }
+    for(const label of labels){
+      if(!label.re.test(line))continue;
 
-    // OCR may split label/value onto next 1-2 lines.
-    for(let j=i+1;j<=Math.min(i+2,lines.length-1);j++){
-      const target=lines[j];
-      if(forbidden.test(target))continue;
-      for(const n of amountsInLine(target)){
+      // Same-line value
+      for(const n of amountsInLine(line)){
         if(n<10)continue;
-        candidates.push({n,score:360-(j-i)*30,line:target,source:"near-label"});
+        candidates.push({
+          n,
+          score:label.score+200,
+          line,
+          source:label.source+"-same-line"
+        });
+      }
+
+      // OCR may split label/value to the next two lines.
+      for(let j=i+1;j<=Math.min(i+2,lines.length-1);j++){
+        const target=lines[j];
+        if(forbidden.test(target))continue;
+        for(const n of amountsInLine(target)){
+          if(n<10)continue;
+          candidates.push({
+            n,
+            score:label.score-(j-i)*100,
+            line:target,
+            source:label.source+"-nearby"
+          });
+        }
       }
     }
   }
 
-  // Repetition within ONE OCR text is useful and does not depend on receipt layout.
+  // If an explicit payment label was found, return it before any generic fallback.
+  candidates.sort((a,b)=>b.score-a.score || b.n-a.n);
+  if(candidates[0] && candidates[0].score>=1000)return candidates[0];
+
+  // 2) Repetition is only a fallback. It must never beat "領収金額".
   const counts=new Map();
   for(const line of lines){
     if(forbidden.test(line))continue;
@@ -420,25 +448,23 @@ function medicalAmountFromLabels(text){
       counts.set(n,(counts.get(n)||0)+1);
     }
   }
-
   for(const [n,count] of counts){
     if(count>=2){
       candidates.push({
         n,
-        score:260+count*90+(n>=100?30:0),
+        score:300+count*70+(n>=100?20:0),
         line:`repeated x${count}`,
         source:"single-text-repeat"
       });
     }
   }
 
-  // Currency-marked fallback, but avoid tiny numbers.
+  // 3) Currency-marked final fallback.
   for(const line of lines){
-    if(forbidden.test(line))continue;
-    if(!/[円¥￥]/.test(line))continue;
+    if(forbidden.test(line) || !/[円¥￥]/.test(line))continue;
     for(const n of amountsInLine(line)){
       if(n<50)continue;
-      candidates.push({n,score:160+(n>=100?20:0),line,source:"currency"});
+      candidates.push({n,score:180,line,source:"currency-fallback"});
     }
   }
 
@@ -1909,12 +1935,21 @@ function runSelfTest(){
 診療報酬 461点`;
   const ok24=medicalAmountFromLabels(medGeneric).n===920;
   const ok25=medicalDateFromDocument(medGeneric)==="2026-08-10";
+  const medDetailCase=`奈良心療クリニック
+領収金額 920円
+一部負担金 920円
+診療明細
+315 1 315
+78 1 78
+60 1 60`;
+  const ok26=medicalAmountFromLabels(medDetailCase).n===920;
+  const ok27=medicalAmountFromLabels(medDetailCase).source.startsWith("receipt-amount");
 
   currentTab=oldTab;
 
-  const ok=ok1&&ok2&&ok3&&ok4&&ok5&&ok6&&ok7&&ok8&&ok9&&ok10&&ok11&&ok12&&ok13&&ok14&&ok15&&ok16&&ok17&&ok18&&ok19&&ok20&&ok21&&ok22&&ok23&&ok24&&ok25;
+  const ok=ok1&&ok2&&ok3&&ok4&&ok5&&ok6&&ok7&&ok8&&ok9&&ok10&&ok11&&ok12&&ok13&&ok14&&ok15&&ok16&&ok17&&ok18&&ok19&&ok20&&ok21&&ok22&&ok23&&ok24&&ok25&&ok26&&ok27;
   const el=$("selftest");
-  el.textContent=ok?"内部抽出テスト：OK（確定申告＋医療費汎用OCR）":"内部抽出テスト：要修正";
+  el.textContent=ok?"内部抽出テスト：OK（領収金額最優先）":"内部抽出テスト：要修正";
   if(!ok)el.style.background="#ffecec";
   return ok;
 }
