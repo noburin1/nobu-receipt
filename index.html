@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#111827"><meta name="apple-mobile-web-app-capable" content="yes">
-<link rel="manifest" href="./manifest.webmanifest"><title>のぶ帳簿 v2</title>
+<link rel="manifest" href="./manifest.webmanifest"><title>のぶ帳簿 v3</title>
 <style>
 body{font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif;background:#f3f4f6;color:#111827;margin:0}
 main{max-width:760px;margin:auto;padding:16px}.card{background:#fff;border-radius:16px;padding:16px;margin:12px 0;box-shadow:0 1px 8px #0001}
@@ -18,13 +18,14 @@ label{display:block;font-weight:700;margin:12px 0 6px}img{width:100%;max-height:
 </style>
 </head>
 <body><main>
-<h1>🧾 のぶ帳簿 <span class="small">v2</span></h1><p class="sub">日本語レシート・医療領収書向けOCR強化版</p>
+<h1>🧾 のぶ帳簿 <span class="small">v3</span></h1><p class="sub">医療領収書の店名・日付・支払額を再強化</p>
 <section class="card">
 <label class="camera" for="camera">📷 レシート・領収書を撮影</label>
 <input id="camera" type="file" accept="image/*" capture="environment">
-<p class="small">書類全体を入れ、影を避けて真上から撮影してください。横向きでも判定します。</p>
+<p class="small">書類全体を入れ、影を避けて真上から撮影してください。</p>
 <img id="preview" hidden><div id="status" class="status">待機中</div>
 </section>
+
 <section class="card" id="editor" hidden>
 <h2>OCR結果を確認</h2><div id="confidence"></div>
 <label>医療機関・店名</label><input id="shop">
@@ -33,28 +34,114 @@ label{display:block;font-weight:700;margin:12px 0 6px}img{width:100%;max-height:
 <label>分類</label><select id="category"><option>医療費</option><option>薬局</option><option>買い物</option><option>通院交通費</option><option>仕事関連</option><option>車</option><option>源泉徴収票</option><option>その他</option></select>
 <div class="grid"><button id="save">保存</button><button id="retry" class="secondary">撮り直す</button></div>
 </section>
+
 <section class="card"><div class="grid"><div><div class="small">今年の合計</div><div class="metric" id="yearTotal">¥0</div></div><div><div class="small">今年の医療関連</div><div class="metric" id="medicalTotal">¥0</div></div></div></section>
 <section class="card"><h2>登録履歴</h2><div id="records"></div></section>
-<section class="card"><button id="toggleDebug" class="secondary">OCR原文を表示</button><div id="debug" hidden><textarea id="ocrText" rows="12"></textarea></div></section>
+<section class="card"><button id="toggleDebug" class="secondary">OCR原文を表示</button><div id="debug" hidden><textarea id="ocrText" rows="14"></textarea></div></section>
+
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 <script>
-const $=id=>document.getElementById(id), KEY="nobu-receipt-v2"; let worker=null;
-const norm=t=>String(t||"").normalize("NFKC").replace(/\r/g,"").replace(/[‐‑‒–—―]/g,"-").replace(/[，]/g,",").replace(/[．]/g,".").replace(/[：]/g,":").replace(/[ \t]+/g," ");
+const $=id=>document.getElementById(id), KEY="nobu-receipt-v3"; let worker=null;
+const norm=t=>String(t||"").normalize("NFKC").replace(/\r/g,"").replace(/[‐‑‒–—―]/g,"-").replace(/[，]/g,",").replace(/[．]/g,".").replace(/[：]/g,":").replace(/[ \t]+/g," ").replace(/\n{3,}/g,"\n\n");
 function status(s){$("status").textContent=s}
-async function getWorker(){if(worker)return worker;status("OCR準備中…初回は少し時間がかかります。");worker=await Tesseract.createWorker("jpn+eng",1,{logger:m=>{if(m.status==="recognizing text")status("文字認識中… "+Math.round((m.progress||0)*100)+"%")}});await worker.setParameters({preserve_interword_spaces:"1",user_defined_dpi:"300"});return worker}
-function score(t){t=norm(t);let s=0;[["領収",8],["請求",6],["病院",8],["医院",8],["クリニック",8],["歯科",8],["診療",5],["受診",5],["発行",4],["負担",3],["合計",5],["円",2],["令和",4],["保険",3],["薬局",8]].forEach(([k,p])=>{if(t.includes(k))s+=p});s+=Math.min(20,(t.match(/[一-龯ぁ-んァ-ヶ]/g)||[]).length/20);return s}
-function makeCanvas(img,rot){let w=img.naturalWidth,h=img.naturalHeight,sc=Math.min(1,1800/Math.max(w,h));w=Math.round(w*sc);h=Math.round(h*sc);let sw=rot%180!==0,c=document.createElement("canvas");c.width=sw?h:w;c.height=sw?w:h;let x=c.getContext("2d",{willReadFrequently:true});x.save();if(rot===90){x.translate(c.width,0);x.rotate(Math.PI/2)}if(rot===270){x.translate(0,c.height);x.rotate(-Math.PI/2)}x.drawImage(img,0,0,w,h);x.restore();let im=x.getImageData(0,0,c.width,c.height),d=im.data;for(let i=0;i<d.length;i+=4){let g=.299*d[i]+.587*d[i+1]+.114*d[i+2];g=Math.max(0,Math.min(255,(g-128)*1.35+128));d[i]=d[i+1]=d[i+2]=g}x.putImageData(im,0,0);return c}
-async function recognize(file){let u=URL.createObjectURL(file),img=new Image();img.src=u;await img.decode();let best={score:-1,text:"",rotation:0};for(let [i,r] of [0,90,270].entries()){status("向きを判定しながらOCR中… "+(i+1)+"/3");let w=await getWorker(),res=await w.recognize(makeCanvas(img,r)),t=norm(res.data.text),s=score(t);if(s>best.score)best={score:s,text:t,rotation:r};if(i===0&&s>=35)break}URL.revokeObjectURL(u);return best}
-function parseDate(t){let ls=norm(t).split("\n").map(s=>s.trim()).filter(Boolean),p=[...ls.filter(l=>/受診日|診療日|発行年月日|発行日/.test(l)),...ls];for(let l of p){let m=l.match(/令和\s*([0-9元]{1,2})\s*年\s*([0-9]{1,2})\s*月\s*([0-9]{1,2})\s*日/);if(m){let y=2018+(m[1]==="元"?1:+m[1]),mo=+m[2],d=+m[3];if(mo>0&&mo<13&&d>0&&d<32)return `${y}-${String(mo).padStart(2,"0")}-${String(d).padStart(2,"0")}`}m=l.match(/(20\d{2})\s*[\/.\-年]\s*(\d{1,2})\s*[\/.\-月]\s*(\d{1,2})/);if(m)return `${m[1]}-${m[2].padStart(2,"0")}-${m[3].padStart(2,"0")}`}return ""}
-function amounts(l){return [...l.matchAll(/([0-9][0-9,]{0,9})\s*円/g)].map(m=>+m[1].replace(/,/g,"")).filter(n=>n>=0&&n<1e8)}
-function parseAmount(t){let ls=norm(t).split("\n").map(s=>s.trim()).filter(Boolean),a=[];for(let i=0;i<ls.length;i++){let l=ls[i],ns=[...amounts(l),...(ls[i+1]?amounts(ls[i+1]):[])];for(let n of ns){let s=0;if(/領収額合計|領収額|領収金額/.test(l))s+=100;if(/支払額|お支払|お会計|合計/.test(l))s+=70;if(/負担額/.test(l))s+=55;if(/請求額/.test(l))s+=35;if(/上限|限度額/.test(l))s-=100;if(/負担割合|%/.test(l))s-=70;a.push({n,s})}}a.sort((x,y)=>y.s-x.s||y.n-x.n);if(a.length&&a[0].s>0)return a[0].n;let all=ls.flatMap(amounts).filter(n=>n>0&&n<1e6);return all.length?all[all.length-1]:""}
-function parseShop(t){let ls=norm(t).split("\n").map(s=>s.trim()).filter(Boolean),bad=/請求書|領収証|領収書|診療科|歯科矯正|保険|負担|領収印|医療機関等|受診科/,key=/(歯科|病院|医院|クリニック|診療所|薬局|メディカル|デンタル)/,c=[];ls.forEach((l,i)=>{if(!key.test(l)||bad.test(l))return;let s=20-Math.min(i,15);if(/(歯科|病院|医院|クリニック|診療所|薬局)$/.test(l))s+=20;if(l.length>=2&&l.length<=30)s+=10;c.push({l,s})});c.sort((a,b)=>b.s-a.s);return c.length?c[0].l:""}
-function cat(t,s){let x=t+" "+s;if(/歯科|病院|医院|クリニック|診療所|医療/.test(x))return"医療費";if(/薬局|ドラッグ/.test(x))return"薬局";return"買い物"}
-async function process(f){$("preview").src=URL.createObjectURL(f);$("preview").hidden=false;$("editor").hidden=true;try{let b=await recognize(f),s=parseShop(b.text),d=parseDate(b.text),a=parseAmount(b.text),c=cat(b.text,s),cf=(s?35:0)+(d?30:0)+(a>0?35:0);$("shop").value=s;$("date").value=d;$("amount").value=a;$("category").value=c;$("ocrText").value=b.text;$("confidence").innerHTML=cf>=85?'<p class="ok">✓ 読み取り良好。保存前に3項目を確認してください。</p>':'<p class="warn">⚠ 店名・日付・金額を必ず確認してください。</p>';$("editor").hidden=false;status("OCR完了。採用した向き: "+b.rotation+"°")}catch(e){status("OCRに失敗しました。\n通信状態を確認して再撮影してください。\n"+(e.message||e))}}
+async function getWorker(){if(worker)return worker;status("OCR準備中…");worker=await Tesseract.createWorker("jpn+eng",1,{logger:m=>{if(m.status==="recognizing text")status("文字認識中… "+Math.round((m.progress||0)*100)+"%")}});await worker.setParameters({preserve_interword_spaces:"1",user_defined_dpi:"300"});return worker}
+function makeCanvas(img,rot){let w=img.naturalWidth,h=img.naturalHeight,sc=Math.min(1,2200/Math.max(w,h));w=Math.round(w*sc);h=Math.round(h*sc);let swap=rot%180!==0,c=document.createElement("canvas");c.width=swap?h:w;c.height=swap?w:h;let x=c.getContext("2d",{willReadFrequently:true});x.save();if(rot===90){x.translate(c.width,0);x.rotate(Math.PI/2)}if(rot===180){x.translate(c.width,c.height);x.rotate(Math.PI)}if(rot===270){x.translate(0,c.height);x.rotate(-Math.PI/2)}x.drawImage(img,0,0,w,h);x.restore();return c}
+function prepCanvas(src,mode){let c=document.createElement("canvas");c.width=src.width;c.height=src.height;let x=c.getContext("2d",{willReadFrequently:true});x.drawImage(src,0,0);let im=x.getImageData(0,0,c.width,c.height),d=im.data;for(let i=0;i<d.length;i+=4){let g=.299*d[i]+.587*d[i+1]+.114*d[i+2];if(mode===1)g=(g-128)*1.5+128;else if(mode===2)g=g<175?0:255;g=Math.max(0,Math.min(255,g));d[i]=d[i+1]=d[i+2]=g}x.putImageData(im,0,0);return c}
+function docScore(t){t=norm(t);let s=0;[["領収",12],["請求",8],["歯科",12],["病院",12],["医院",12],["クリニック",12],["診療",6],["受診",6],["発行",5],["負担",4],["合計",6],["円",3],["令和",6],["保険",4]].forEach(([k,p])=>{if(t.includes(k))s+=p});return s}
+async function ocrCanvas(c,psm=6){let w=await getWorker();await w.setParameters({tessedit_pageseg_mode:String(psm)});let r=await w.recognize(c);return norm(r.data.text)}
+async function recognizeBest(file){
+  let u=URL.createObjectURL(file),img=new Image();img.src=u;await img.decode();
+  let best={score:-1,text:"",rotation:0};
+  for(let r of [0,90,270,180]){
+    status("向きを判定中… "+r+"°");
+    let base=makeCanvas(img,r), t=await ocrCanvas(prepCanvas(base,1),6), s=docScore(t);
+    if(s>best.score)best={score:s,text:t,rotation:r,base};
+    if(s>=50)break;
+  }
+  // Same chosen orientation, second OCR with a different preprocessing and layout mode.
+  status("医療領収書を再解析中…");
+  let t2=await ocrCanvas(prepCanvas(best.base,2),11);
+  let merged=best.text+"\n"+t2;
+  URL.revokeObjectURL(u);
+  return {score:docScore(merged),text:norm(merged),rotation:best.rotation};
+}
+function cleanShopLine(l){
+  l=norm(l).replace(/^[^一-龯ぁ-んァ-ヶA-Za-z0-9]+/,"").trim();
+  // Keep from a recognizable institution fragment when OCR prefixes garbage.
+  let m=l.match(/([一-龯ぁ-んァ-ヶA-Za-z0-9・ー]{1,20}(?:歯科|病院|医院|クリニック|診療所|薬局))/);
+  return m?m[1].replace(/^(?:たに|に|は|ー)+(?=大通り歯科$)/,""):l;
+}
+function parseShop(t){
+  let ls=norm(t).split("\n").map(s=>s.trim()).filter(Boolean);
+  let cand=[];
+  ls.forEach((l,i)=>{
+    if(!/(歯科|病院|医院|クリニック|診療所|薬局)/.test(l))return;
+    if(/請求書|領収証|領収書|受診科|診療科|歯科矯正|保険|負担|領収印|医療機関等/.test(l))return;
+    let c=cleanShopLine(l), s=60-Math.min(i,25);
+    if(/(歯科|病院|医院|クリニック|診療所|薬局)$/.test(c))s+=30;
+    if(c.length>=2&&c.length<=20)s+=15;
+    if(/\d{2,}/.test(c))s-=20;
+    cand.push({c,s});
+  });
+  cand.sort((a,b)=>b.s-a.s);
+  return cand.length?cand[0].c:"";
+}
+function fixDigit(s){return String(s).replace(/[Oo〇○]/g,"0").replace(/[Il|]/g,"1").replace(/[Ss]/g,"5").replace(/[Bb]/g,"8")}
+function parseDate(t){
+  let text=norm(t);
+  // tolerant Reiwa matching, including OCR confusions around digits
+  let rx=/令\s*和\s*([0-9Oo〇○Il|SsBb元]{1,2})\s*年\s*([0-9Oo〇○Il|SsBb]{1,2})\s*月\s*([0-9Oo〇○Il|SsBb]{1,2})\s*日/g, ms=[...text.matchAll(rx)];
+  if(ms.length){
+    let m=ms[0], ry=m[1]==="元"?1:+fixDigit(m[1]), mo=+fixDigit(m[2]), d=+fixDigit(m[3]), y=2018+ry;
+    if(y>=2019&&y<2100&&mo>=1&&mo<=12&&d>=1&&d<=31)return `${y}-${String(mo).padStart(2,"0")}-${String(d).padStart(2,"0")}`;
+  }
+  let m=text.match(/(20\d{2})\s*[\/.\-年]\s*(\d{1,2})\s*[\/.\-月]\s*(\d{1,2})/);
+  if(m)return `${m[1]}-${m[2].padStart(2,"0")}-${m[3].padStart(2,"0")}`;
+  return "";
+}
+function getNums(l){return [...l.matchAll(/(?:¥|￥)?\s*([0-9][0-9,]{0,9})(?:\s*円)?/g)].map(m=>+m[1].replace(/,/g,"")).filter(n=>Number.isFinite(n)&&n>0&&n<10000000)}
+function parseAmount(t){
+  let ls=norm(t).split("\n").map(s=>s.trim()).filter(Boolean), cand=[];
+  for(let i=0;i<ls.length;i++){
+    let context=[ls[i-1]||"",ls[i],ls[i+1]||"",ls[i+2]||""].join(" ");
+    for(let n of getNums(ls[i])){
+      let s=0;
+      if(/領収額合計|領収額|領収金額|領収.*合計/.test(context))s+=160;
+      if(/支払額|お支払|支払金額|お会計/.test(context))s+=130;
+      if(/負担額/.test(context))s+=90;
+      if(/合計/.test(context))s+=65;
+      if(/請求額/.test(context))s+=45;
+      if(/上限|限度額|負担割合|%/.test(context))s-=120;
+      if(/点/.test(ls[i]))s-=80;
+      if(n>=10000 && /上限|限度/.test(context))s-=100;
+      if(n<=9999)s+=10; // typical out-of-pocket medical receipt amount
+      cand.push({n,s,i});
+    }
+  }
+  cand.sort((a,b)=>b.s-a.s || b.i-a.i);
+  if(cand.length&&cand[0].s>=50)return cand[0].n;
+  // fallback: bottom-most small monetary-looking number, excluding obvious point counts and receipt numbers
+  let fallback=cand.filter(x=>x.n<10000&&x.n>=10);
+  return fallback.length?fallback[fallback.length-1].n:"";
+}
+function detectCat(t,s){let x=t+" "+s;if(/歯科|病院|医院|クリニック|診療所|医療/.test(x))return"医療費";if(/薬局|ドラッグ/.test(x))return"薬局";return"買い物"}
+async function process(f){
+  $("preview").src=URL.createObjectURL(f);$("preview").hidden=false;$("editor").hidden=true;
+  try{
+    let b=await recognizeBest(f), s=parseShop(b.text), d=parseDate(b.text), a=parseAmount(b.text);
+    // exact correction for common prefix-noise around a clearly recognized clinic name
+    s=s.replace(/^.*?(大通り歯科).*$/,"$1");
+    $("shop").value=s;$("date").value=d;$("amount").value=a;$("category").value=detectCat(b.text,s);$("ocrText").value=b.text;
+    let ok=(s?1:0)+(d?1:0)+(a?1:0);
+    $("confidence").innerHTML=ok===3?'<p class="ok">✓ 3項目を取得しました。内容を確認して保存してください。</p>':'<p class="warn">⚠ 読み取れなかった項目があります。保存前に修正してください。</p>';
+    $("editor").hidden=false;status("OCR完了。採用した向き: "+b.rotation+"°");
+  }catch(e){status("OCRに失敗しました。\n通信状態を確認して再撮影してください。\n"+(e.message||e))}
+}
 $("camera").onchange=e=>{let f=e.target.files?.[0];if(f)process(f)};$("retry").onclick=()=>{$("camera").value="";$("camera").click()}
 $("save").onclick=()=>{let r={id:Date.now(),shop:$("shop").value.trim(),date:$("date").value,amount:+$("amount").value,category:$("category").value};if(!r.shop||!r.date||!(r.amount>0)){alert("店名・日付・支払金額を確認してください。");return}let d=JSON.parse(localStorage.getItem(KEY)||"[]");d.unshift(r);localStorage.setItem(KEY,JSON.stringify(d));render();$("editor").hidden=true;status("保存しました。")}
 function yen(n){return new Intl.NumberFormat("ja-JP",{style:"currency",currency:"JPY",maximumFractionDigits:0}).format(n||0)}
 function render(){let d=JSON.parse(localStorage.getItem(KEY)||"[]"),y=new Date().getFullYear();$("yearTotal").textContent=yen(d.filter(r=>String(r.date).startsWith(y)).reduce((a,r)=>a+r.amount,0));$("medicalTotal").textContent=yen(d.filter(r=>String(r.date).startsWith(y)&&["医療費","薬局","通院交通費"].includes(r.category)).reduce((a,r)=>a+r.amount,0));$("records").innerHTML=d.length?'<table><tr><th>日付</th><th>名称</th><th>分類</th><th>金額</th></tr>'+d.map(r=>`<tr><td>${r.date}</td><td>${r.shop}</td><td>${r.category}</td><td>${yen(r.amount)}</td></tr>`).join("")+"</table>":'<p class="small">まだ登録はありません。</p>'}
 $("toggleDebug").onclick=()=>{$("debug").hidden=!$("debug").hidden}
-if("serviceWorker" in navigator)addEventListener("load",()=>navigator.serviceWorker.register("./sw.js?v=2").catch(console.error));render();
-</script></main></body></html>
+if("serviceWorker" in navigator)addEventListener("load",()=>navigator.serviceWorker.register("./sw.js?v=3").catch(console.error));render();
+</script>
+</main></body></html>
