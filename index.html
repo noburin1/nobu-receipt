@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#f5f5f7">
-<title>のぶ帳簿 v35 学習DB搭載版</title>
+<title>のぶ帳簿 v36 確認済み学習版</title>
 <style>
 :root{font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif;color:#111;background:#f5f5f7}
 *{box-sizing:border-box}
@@ -30,7 +30,7 @@ footer{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(
 </style>
 </head>
 <body>
-<header><h1>のぶ帳簿 <span class="ver">v35・学習DB搭載版</span></h1></header>
+<header><h1>のぶ帳簿 <span class="ver">v36・確認済み学習版</span></h1></header>
 
 <div class="card">
   <span id="selftest" class="badge">内部テスト中…</span><span class="badge" style="margin-left:6px">PaddleOCR不使用</span><span class="badge" style="margin-left:6px">店名学習ON</span>
@@ -53,7 +53,7 @@ footer{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(
   <p class="small"><b>買い物レシートは、店名・日付・合計金額が全部入るようにレシート全体を撮影してください。</b></p>
   <img id="preview" class="hidden" alt="preview">
   <button id="ocrBtn" class="primary" style="width:100%;margin-top:10px" disabled>OCRして自動入力</button>
-  <div id="status" class="status" style="margin-top:10px">v35学習DB搭載版を読み込みました。</div>
+  <div id="status" class="status" style="margin-top:10px">v36確認済み学習版を読み込みました。ユーザーが保存した値だけを正解として学習します。</div>
 </div>
 
 <div id="form-medical" class="card">
@@ -104,7 +104,7 @@ footer{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(
     <div><div class="small">学習済み支払先</div><div id="learnProviders" class="total">0件</div></div>
     <div><div class="small">確定・修正履歴</div><div id="learnCorrections" class="total">0件</div></div>
   </div>
-  <p class="small">保存時に確定した店名・病院名・日付・金額をiPhone内に学習します。画像そのものは保存しません。</p>
+  <p class="small">ユーザーが「保存」を押して確定した店名・病院名・日付・金額だけをiPhone内に学習します。推定値は正解DBに登録しません。画像そのものは保存しません。</p>
   <button id="learningExportBtn">学習DBを書き出す</button>
 </div>
 
@@ -180,14 +180,15 @@ const RECEIPT_LEARNING_SEEDS={
       provider:"大通り歯科",
       known_labels:["領収額合計","お支払額","負担額"],
       reject_tokens:["点","負担上限","負担割合"],
-      examples:[{date:"2026-08-12",amount:370}]
+      examples:[{date:"2026-08-12",amount:370,confirmed:true}]
     },
     "奈良心療クリニック":{
       type:"medical",
       provider:"奈良心療クリニック",
       known_labels:["領収金額","一部負担金","窓口負担額"],
       reject_tokens:["点","点数","診療報酬","精神科専門療法","再診料","初診料"],
-      examples:[{date:"2026-08-10",amount:920}]
+      examples:[],
+      seed_rule_only:true
     },
     "小嶋屋総本店 亀田インター店":{
       type:"shopping",
@@ -195,14 +196,14 @@ const RECEIPT_LEARNING_SEEDS={
       phone:"0252505700",
       known_labels:["合計","領収証対象金額"],
       reject_tokens:["現金お預り","お釣り","内消費税"],
-      examples:[{date:"2026-08-25",amount:5126}]
+      examples:[{date:"2026-08-25",amount:5126,confirmed:true}]
     },
     "HottoMotto":{
       type:"shopping",
       provider:"HottoMotto",
       known_labels:["合計","小計"],
       reject_tokens:["お釣り","お預り"],
-      examples:[{amount:2070}]
+      examples:[]
     }
   },
   corrections:[],
@@ -234,6 +235,46 @@ function loadReceiptLearning(){
 }
 
 let receiptLearning=loadReceiptLearning();
+
+function migrateReceiptLearning(){
+  let changed=false;
+
+  // v35 accidentally shipped an unconfirmed 920-yen example for 奈良心療クリニック.
+  // Remove it unless there is an actual user-confirmed correction record for 920.
+  const nara=receiptLearning.providers?.["奈良心療クリニック"];
+  if(nara && Array.isArray(nara.examples)){
+    const confirmed920=(receiptLearning.corrections||[]).some(c=>
+      c.provider==="奈良心療クリニック" &&
+      Number(c.amount)===920 &&
+      c.confirmed===true
+    );
+
+    if(!confirmed920){
+      const before=nara.examples.length;
+      nara.examples=nara.examples.filter(x=>!(Number(x.amount)===920 && x.confirmed!==true));
+      if(nara.examples.length!==before)changed=true;
+    }
+  }
+
+  // Legacy seed HottoMotto 2070 was also not explicitly user-confirmed.
+  const hotto=receiptLearning.providers?.["HottoMotto"];
+  if(hotto && Array.isArray(hotto.examples)){
+    const confirmed2070=(receiptLearning.corrections||[]).some(c=>
+      c.provider==="HottoMotto" &&
+      Number(c.amount)===2070 &&
+      c.confirmed===true
+    );
+    if(!confirmed2070){
+      const before=hotto.examples.length;
+      hotto.examples=hotto.examples.filter(x=>!(Number(x.amount)===2070 && x.confirmed!==true));
+      if(hotto.examples.length!==before)changed=true;
+    }
+  }
+
+  if(changed)saveReceiptLearning();
+}
+migrateReceiptLearning();
+
 
 function saveReceiptLearning(){
   try{
@@ -283,6 +324,11 @@ function findLearnedProvider(text,currentName=""){
   }
 
   return null;
+}
+
+
+function confirmedLearningExamples(provider){
+  return (provider?.examples||[]).filter(x=>x&&x.confirmed===true);
 }
 
 function learnedRejectNumbers(text,learnedProvider){
@@ -353,7 +399,9 @@ function learnConfirmedReceipt(type,data,ocrText){
 
   const example={
     date:data.date||"",
-    amount:Number(data.amount||0)||undefined
+    amount:Number(data.amount||0)||undefined,
+    confirmed:true,
+    source:"user-save"
   };
   if(example.date||example.amount){
     const duplicate=existing.examples.some(x=>
@@ -372,6 +420,8 @@ function learnConfirmedReceipt(type,data,ocrText){
     provider,
     date:data.date||"",
     amount:Number(data.amount||0)||0,
+    confirmed:true,
+    source:"user-save",
     ocr_excerpt:String(ocrText||"").slice(0,1200)
   });
   if(receiptLearning.corrections.length>100){
@@ -2327,7 +2377,8 @@ function updateLearningStats(){
 function exportLearningDb(){
   const data={
     exported_at:new Date().toISOString(),
-    version:1,
+    version:2,
+    policy:"Only values confirmed by user save are ground-truth examples.",
     learning:receiptLearning
   };
   const blob=new Blob([JSON.stringify(data,null,2)],{type:"application/json;charset=utf-8"});
@@ -2498,16 +2549,17 @@ TEL 025-000-0000
   const ok38=medicalReceiptDateFromLabels(dedicatedCase)==="2026-08-10";
   const ok39=medicalAmountFromLabels(dedicatedCase).n===920;
   const seedMed=RECEIPT_LEARNING_SEEDS.providers["奈良心療クリニック"];
-  const ok40=seedMed.examples[0].amount===920;
+  const ok40=seedMed.examples.length===0;
   const seedShop=RECEIPT_LEARNING_SEEDS.providers["小嶋屋総本店 亀田インター店"];
   const ok41=seedShop.examples[0].amount===5126;
   const ok42=seedMed.reject_tokens.includes("点数");
+  const ok43=RECEIPT_LEARNING_SEEDS.providers["大通り歯科"].examples[0].confirmed===true;
 
   currentTab=oldTab;
 
-  const ok=ok1&&ok2&&ok3&&ok4&&ok5&&ok6&&ok7&&ok8&&ok9&&ok10&&ok11&&ok12&&ok13&&ok14&&ok15&&ok16&&ok17&&ok18&&ok19&&ok20&&ok21&&ok22&&ok23&&ok24&&ok25&&ok26&&ok27&&ok28&&ok29&&ok30&&ok31&&ok32&&ok33&&ok34&&ok35&&ok36&&ok37&&ok38&&ok39&&ok40&&ok41&&ok42;
+  const ok=ok1&&ok2&&ok3&&ok4&&ok5&&ok6&&ok7&&ok8&&ok9&&ok10&&ok11&&ok12&&ok13&&ok14&&ok15&&ok16&&ok17&&ok18&&ok19&&ok20&&ok21&&ok22&&ok23&&ok24&&ok25&&ok26&&ok27&&ok28&&ok29&&ok30&&ok31&&ok32&&ok33&&ok34&&ok35&&ok36&&ok37&&ok38&&ok39&&ok40&&ok41&&ok42&&ok43;
   const el=$("selftest");
-  el.textContent=ok?"内部抽出テスト：OK（学習DB搭載）":"内部抽出テスト：要修正";
+  el.textContent=ok?"内部抽出テスト：OK（確認済み学習のみ）":"内部抽出テスト：要修正";
   if(!ok)el.style.background="#ffecec";
   return ok;
 }
