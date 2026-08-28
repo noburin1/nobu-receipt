@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#f5f5f7">
-<title>のぶ帳簿 v21 合計ラベル優先版</title>
+<title>のぶ帳簿 v22 ロゴ漢字強化版</title>
 <style>
 :root{font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif;color:#111;background:#f5f5f7}
 *{box-sizing:border-box}
@@ -30,7 +30,7 @@ footer{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(
 </style>
 </head>
 <body>
-<header><h1>のぶ帳簿 <span class="ver">v21・合計ラベル優先版</span></h1></header>
+<header><h1>のぶ帳簿 <span class="ver">v22・ロゴ漢字強化版</span></h1></header>
 
 <div class="card">
   <span id="selftest" class="badge">内部テスト中…</span><span class="badge" style="margin-left:6px">PaddleOCR不使用</span>
@@ -53,7 +53,7 @@ footer{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(
   <p class="small"><b>買い物レシートは、店名・日付・合計金額が全部入るようにレシート全体を撮影してください。</b></p>
   <img id="preview" class="hidden" alt="preview">
   <button id="ocrBtn" class="primary" style="width:100%;margin-top:10px" disabled>OCRして自動入力</button>
-  <div id="status" class="status" style="margin-top:10px">v21安定版を読み込みました。レシート全体を撮影してください。</div>
+  <div id="status" class="status" style="margin-top:10px">v22安定版を読み込みました。レシート全体を撮影してください。</div>
 </div>
 
 <div id="form-medical" class="card">
@@ -477,6 +477,24 @@ function cropCanvas(src,x1,y1,x2,y2,scale=1){
   c.width=Math.max(1,Math.floor(sw*scale));
   c.height=Math.max(1,Math.floor(sh*scale));
   c.getContext("2d",{willReadFrequently:true}).drawImage(src,sx,sy,sw,sh,0,0,c.width,c.height);
+  return c;
+}
+
+
+function thresholdCanvas(src,threshold=155,invert=false){
+  const c=document.createElement("canvas");
+  c.width=src.width;c.height=src.height;
+  const ctx=c.getContext("2d",{willReadFrequently:true});
+  ctx.drawImage(src,0,0);
+  const im=ctx.getImageData(0,0,c.width,c.height);
+  const d=im.data;
+  for(let i=0;i<d.length;i+=4){
+    const g=.299*d[i]+.587*d[i+1]+.114*d[i+2];
+    let v=g>=threshold?255:0;
+    if(invert)v=255-v;
+    d[i]=d[i+1]=d[i+2]=v;
+  }
+  ctx.putImageData(im,0,0);
   return c;
 }
 
@@ -908,7 +926,8 @@ function storeLineScore(line){
 
   let score=0;
   if(/(本店|支店|営業所|インター店|センター店|店)$/.test(s))score+=180;
-  if(/(総本店|インター店|ショッピング|スーパー|マート|ストア|ドラッグ|MOTTO|MART|STORE)/i.test(s))score+=80;
+  if(/総本店/.test(s))score+=260;
+  if(/(インター店|ショッピング|スーパー|マート|ストア|ドラッグ|MOTTO|MART|STORE)/i.test(s))score+=80;
   if(/[一-龯ぁ-んァ-ヶ]/.test(s))score+=30;
   if(s.length>=4&&s.length<=18)score+=20;
   return score;
@@ -918,9 +937,21 @@ function pickStoreNameFromTexts(texts){
   const candidates=[];
   for(const raw of texts){
     const lines=String(raw||"").split(/\n+/).map(normalizeStoreLine).filter(Boolean);
-    for(const line of lines){
-      const score=storeLineScore(line);
-      if(score>0)candidates.push({line,score});
+    for(const original of lines){
+      const variants=[original];
+
+      // If logo OCR adds garbage around a Japanese store name, keep the useful
+      // substring ending in 総本店/本店.
+      const brandMatch=original.match(/([一-龯ぁ-んァ-ヶ]{2,14}総本店)/);
+      if(brandMatch)variants.push(brandMatch[1]);
+
+      const branchMatch=original.match(/([一-龯ぁ-んァ-ヶA-Za-z]{1,18}(?:インター店|センター店|支店|営業所|店))/);
+      if(branchMatch)variants.push(branchMatch[1]);
+
+      for(const line of variants){
+        const score=storeLineScore(line);
+        if(score>0)candidates.push({line,score});
+      }
     }
   }
 
@@ -939,7 +970,9 @@ function pickStoreNameFromTexts(texts){
   if(/^田インター店$/.test(branch))branch="亀田インター店";
 
   // If a reliable brand line and branch line both exist, combine them.
-  const brand=candidates.find(c=>/総本店$/.test(c.line) && c.line!==branch)?.line||"";
+  const brand=candidates
+    .filter(c=>/総本店$/.test(c.line) && c.line!==branch)
+    .sort((a,b)=>b.score-a.score || b.line.length-a.line.length)[0]?.line||"";
   const branchCand=candidates.find(c=>/(インター店|支店|営業所|センター店|店)$/.test(c.line) && !/総本店$/.test(c.line))?.line||branch;
 
   let cleanBranch=branchCand;
@@ -1009,21 +1042,25 @@ function pickBestDateFromTexts(texts){
 }
 
 async function precisionShoppingHeader(file){
-  // Dedicated header OCR: store name/date live in the top area of most receipts.
+  // 1) Read normal header text first to determine the likely orientation.
   const angles=[0,90,-90];
   const zones=[
-    [0.00,0.00,1.00,0.38],
-    [0.00,0.00,1.00,0.52],
-    [0.05,0.00,0.95,0.65]
+    [0.00,0.00,1.00,0.40],
+    [0.00,0.00,1.00,0.55],
+    [0.04,0.00,0.96,0.68]
   ];
   const psms=[Tesseract.PSM.SPARSE_TEXT,Tesseract.PSM.AUTO];
   const texts=[];
+  let likelyAngle=0;
+  let foundCore=false;
 
   await restoreTextOCR();
   const w=await ensureWorker();
 
   for(const angle of angles){
+    const localTexts=[];
     const oriented=await makeCanvas(file,"full",angle);
+
     for(let zi=0;zi<zones.length;zi++){
       const z=zones[zi];
       const part=cropCanvas(oriented,z[0],z[1],z[2],z[3],zi===0?2.0:1.6);
@@ -1036,25 +1073,57 @@ async function precisionShoppingHeader(file){
           preserve_interword_spaces:"1"
         });
         const r=await w.recognize(part,{rotateAuto:false});
-        texts.push(r.data.text||"");
+        const raw=r.data.text||"";
+        texts.push(raw);
+        localTexts.push(raw);
       }
+    }
 
-      // Stop early if both are already stable.
-      const store=pickStoreNameFromTexts(texts);
-      const date=pickBestDateFromTexts(texts);
-      if(store && date){
-        await restoreTextOCR();
-        return {store,date,text:texts.join("\n--- header pass ---\n"),angle};
-      }
+    const localStore=pickStoreNameFromTexts(localTexts);
+    const localDate=pickBestDateFromTexts(localTexts);
+    if(localStore && localDate){
+      likelyAngle=angle;
+      foundCore=true;
+      break;
+    }
+  }
+
+  // 2) IMPORTANT: even when branch name + date are already found, continue and
+  // OCR the stylized/logo area. This fixes the previous early-exit behavior.
+  const oriented=await makeCanvas(file,"full",likelyAngle);
+
+  // Top 28% contains logos/brand names on most receipts.
+  const logoBase=cropCanvas(oriented,0.03,0.00,0.97,0.30,2.4);
+  const logoVariants=[
+    logoBase,
+    thresholdCanvas(logoBase,120,false),
+    thresholdCanvas(logoBase,150,false),
+    thresholdCanvas(logoBase,180,false)
+  ];
+
+  const logoPsms=[Tesseract.PSM.SPARSE_TEXT,Tesseract.PSM.SINGLE_LINE];
+
+  for(let vi=0;vi<logoVariants.length;vi++){
+    for(let pi=0;pi<logoPsms.length;pi++){
+      setStatus(`ロゴ・太字漢字を重点OCR中… ${vi+1}/${logoVariants.length}`);
+      await w.setParameters({
+        tessedit_char_whitelist:"",
+        tessedit_pageseg_mode:logoPsms[pi],
+        preserve_interword_spaces:"1"
+      });
+      const r=await w.recognize(logoVariants[vi],{rotateAuto:false});
+      texts.push(r.data.text||"");
     }
   }
 
   await restoreTextOCR();
+
   return {
     store:pickStoreNameFromTexts(texts),
     date:pickBestDateFromTexts(texts),
-    text:texts.join("\n--- header pass ---\n"),
-    angle:0
+    text:texts.join("\n--- header/logo pass ---\n"),
+    angle:likelyAngle,
+    foundCore
   };
 }
 
@@ -1271,7 +1340,7 @@ function runSelfTest(){
 
   const ok=ok1&&ok2&&ok3&&ok4&&ok5&&ok6&&ok7&&ok8&&ok9&&ok10&&ok11&&ok12&&ok13&&ok14&&ok15;
   const el=$("selftest");
-  el.textContent=ok?"内部抽出テスト：OK（合計ラベル優先）":"内部抽出テスト：要修正";
+  el.textContent=ok?"内部抽出テスト：OK（合計＋ロゴ漢字）":"内部抽出テスト：要修正";
   if(!ok)el.style.background="#ffecec";
   return ok;
 }
