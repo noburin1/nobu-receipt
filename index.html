@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#f5f5f7">
-<title>のぶ帳簿 v16 日付強化安定版</title>
+<title>のぶ帳簿 v17 買い物日付強化版</title>
 <style>
 :root{font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif;color:#111;background:#f5f5f7}
 *{box-sizing:border-box}
@@ -30,7 +30,7 @@ footer{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(
 </style>
 </head>
 <body>
-<header><h1>のぶ帳簿 <span class="ver">v16・日付強化安定版</span></h1></header>
+<header><h1>のぶ帳簿 <span class="ver">v17・買い物日付強化版</span></h1></header>
 
 <div class="card">
   <span id="selftest" class="badge">内部テスト中…</span><span class="badge" style="margin-left:6px">PaddleOCR不使用</span>
@@ -50,9 +50,10 @@ footer{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(
     <div class="camwrap"><button class="primary" style="width:100%">📷 カメラで撮影</button><input id="camera" type="file" accept="image/*" capture="environment"></div>
     <div class="camwrap"><button style="width:100%">写真を選ぶ</button><input id="picker" type="file" accept="image/*"></div>
   </div>
+  <p class="small"><b>買い物レシートは、店名・日付・合計金額が全部入るようにレシート全体を撮影してください。</b></p>
   <img id="preview" class="hidden" alt="preview">
   <button id="ocrBtn" class="primary" style="width:100%;margin-top:10px" disabled>OCRして自動入力</button>
-  <div id="status" class="status" style="margin-top:10px">v16安定版を読み込みました。領収書を撮影してください。</div>
+  <div id="status" class="status" style="margin-top:10px">v17安定版を読み込みました。レシート全体を撮影してください。</div>
 </div>
 
 <div id="form-medical" class="card">
@@ -603,6 +604,43 @@ function safeShoppingAmount(text){
   c.sort((a,b)=>b.score-a.score||b.n-a.n);
   return c[0]?.score>=80?c[0].n:"";
 }
+
+async function precisionShoppingDate(file){
+  const angles=[0,90,-90];
+  const zones=[
+    [0.00,0.00,1.00,0.38],
+    [0.00,0.00,1.00,0.58],
+    [0.00,0.00,1.00,1.00]
+  ];
+
+  await restoreTextOCR();
+  const w=await ensureWorker();
+
+  for(const angle of angles){
+    const oriented=await makeCanvas(file,"full",angle);
+    for(let zi=0;zi<zones.length;zi++){
+      setStatus(`購入日を精密OCR中… ${angle}° ${zi+1}/${zones.length}`);
+      const z=zones[zi];
+      const part=cropCanvas(oriented,z[0],z[1],z[2],z[3],zi===2?1:1.7);
+
+      await w.setParameters({
+        tessedit_char_whitelist:"",
+        tessedit_pageseg_mode: zi===2 ? Tesseract.PSM.AUTO : Tesseract.PSM.SPARSE_TEXT,
+        preserve_interword_spaces:"1"
+      });
+
+      const r=await w.recognize(part,{rotateAuto:false});
+      const raw=r.data.text||"";
+      const date=parseDate(raw);
+      if(date){
+        await restoreTextOCR();
+        return {date,text:raw,angle};
+      }
+    }
+  }
+  await restoreTextOCR();
+  return null;
+}
 $("ocrBtn").onclick=async()=>{
   if(!currentFile)return;
   $("ocrBtn").disabled=true;$("ocrBtn").textContent="OCR処理中…";
@@ -649,8 +687,23 @@ $("ocrBtn").onclick=async()=>{
       }
     }else{
       applyParsed(combined);
+
+      if(currentTab==="shopping" && !$("s-date").value){
+        const pd=await precisionShoppingDate(currentFile);
+        if(pd){
+          combined += "\n--- 購入日精密OCR ---\n"+pd.text;
+          $("raw").value=combined;
+          $("s-date").value=pd.date;
+        }
+      }
+
       const a=$("s-amount").value,d=$("s-date").value,n=$("s-name").value;
-      setStatus("OCR完了。"+[n&&`名称「${n}」`,d&&`日付 ${d}`,a&&`金額 ${a}円`].filter(Boolean).join(" / ")+"\n保存前に内容を確認してください。","ok");
+      if(currentTab==="shopping" && !d){
+        setStatus(`店名「${n||"要確認"}」 / 金額 ${a? a+"円":"要確認"} は取得できましたが、購入日は写真内で確認できませんでした。
+月別集計を正しくするため、日付が写るようにレシート全体を撮影してください。`,"err");
+      }else{
+        setStatus("OCR完了。"+[n&&`名称「${n}」`,d&&`日付 ${d}`,a&&`金額 ${a}円`].filter(Boolean).join(" / ")+"\n保存前に内容を確認してください。","ok");
+      }
     }
   }catch(e){
     console.error(e);
@@ -668,7 +721,23 @@ function add(type,obj){
   setStatus("保存しました。","ok");
 }
 $("saveMedical").onclick=()=>add("medical",{name:$("m-name").value.trim(),date:$("m-date").value,amount:Number($("m-amount").value||0),ocr:$("raw").value});
-$("saveShopping").onclick=()=>add("shopping",{name:$("s-name").value.trim(),date:$("s-date").value,amount:Number($("s-amount").value||0),ocr:$("raw").value});
+$("saveShopping").onclick=()=>{
+  const name=$("s-name").value.trim();
+  const date=$("s-date").value;
+  const amount=Number($("s-amount").value||0);
+
+  if(!date){
+    setStatus("購入日が空欄のため保存していません。月別集計を正しくするため、日付を入力するかレシート全体を再撮影してください。","err");
+    $("s-date").focus();
+    return;
+  }
+  if(!amount || amount<=0){
+    setStatus("金額が確認できないため保存していません。","err");
+    $("s-amount").focus();
+    return;
+  }
+  add("shopping",{name,date,amount,ocr:$("raw").value});
+};
 $("saveTax").onclick=()=>add("tax",{name:$("t-name").value.trim(),year:$("t-year").value,payment:Number($("t-payment").value||0),tax:Number($("t-tax").value||0),ocr:$("raw").value});
 $("filter").onchange=render;
 
@@ -731,7 +800,7 @@ function runSelfTest(){
 
   const ok=ok1&&ok2&&ok3&&ok4&&ok5&&ok6;
   const el=$("selftest");
-  el.textContent=ok?"内部抽出テスト：OK（金額＋日付精密OCR）":"内部抽出テスト：要修正";
+  el.textContent=ok?"内部抽出テスト：OK（医療費＋買い物日付）":"内部抽出テスト：要修正";
   if(!ok)el.style.background="#ffecec";
   return ok;
 }
