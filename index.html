@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#f5f5f7">
-<title>のぶ帳簿 v38 請求書領収金額対応版</title>
+<title>のぶ帳簿 v39 撮影ガイド搭載版</title>
 <style>
 :root{font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif;color:#111;background:#f5f5f7}
 *{box-sizing:border-box}
@@ -27,10 +27,70 @@ label{display:block;font-size:13px;color:#555;margin:10px 0 5px}
 footer{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(safe-area-inset-bottom));background:rgba(250,250,252,.96);backdrop-filter:blur(12px);z-index:10}
 .camwrap{position:relative}.camwrap input{position:absolute;inset:0;opacity:0;width:100%;height:100%}
 .badge{display:inline-block;border-radius:999px;padding:4px 8px;background:#e9e9ed;font-size:12px;font-weight:700}
+
+.camera-modal{
+  position:fixed;inset:0;background:#000;z-index:9999;
+  display:none;flex-direction:column;
+}
+.camera-modal.show{display:flex}
+.camera-stage{position:relative;flex:1;overflow:hidden;background:#000}
+.camera-stage video{
+  width:100%;height:100%;object-fit:cover;display:block;
+}
+.camera-guide{
+  position:absolute;inset:0;pointer-events:none;
+}
+.receipt-frame{
+  position:absolute;
+  left:8%;right:8%;top:7%;bottom:14%;
+  border:3px solid rgba(255,255,255,.95);
+  border-radius:18px;
+  box-shadow:0 0 0 9999px rgba(0,0,0,.22);
+}
+.receipt-frame:before,.receipt-frame:after{
+  content:"";position:absolute;left:0;right:0;height:1px;
+  background:rgba(255,255,255,.6);
+}
+.receipt-frame:before{top:33.333%}
+.receipt-frame:after{top:66.666%}
+.guide-v{
+  position:absolute;top:0;bottom:0;width:1px;
+  background:rgba(255,255,255,.55);
+}
+.guide-v.v1{left:33.333%}
+.guide-v.v2{left:66.666%}
+.guide-center{
+  position:absolute;left:50%;top:0;bottom:0;width:2px;
+  transform:translateX(-1px);
+  background:rgba(80,220,120,.8);
+}
+.camera-hint{
+  position:absolute;left:8%;right:8%;top:2%;
+  color:#fff;text-align:center;font-weight:700;
+  text-shadow:0 1px 3px #000;
+  font-size:15px;
+}
+.camera-controls{
+  padding:14px;background:#0b0b0b;display:grid;
+  grid-template-columns:1fr 1.2fr 1fr;gap:10px;
+  padding-bottom:max(14px,env(safe-area-inset-bottom));
+}
+.camera-controls button{
+  min-height:54px;border-radius:14px;font-size:17px;font-weight:700;
+}
+.capture-main{
+  background:#fff!important;color:#000!important;
+}
+.camera-quality{
+  position:absolute;left:50%;bottom:16px;transform:translateX(-50%);
+  background:rgba(0,0,0,.55);color:#fff;padding:7px 12px;
+  border-radius:999px;font-size:13px;white-space:nowrap;
+}
+
 </style>
 </head>
 <body>
-<header><h1>のぶ帳簿 <span class="ver">v38・請求書領収金額対応版</span></h1></header>
+<header><h1>のぶ帳簿 <span class="ver">v39・撮影ガイド搭載版</span></h1></header>
 
 <div class="card">
   <span id="selftest" class="badge">内部テスト中…</span><span class="badge" style="margin-left:6px">PaddleOCR不使用</span><span class="badge" style="margin-left:6px">店名学習ON</span>
@@ -47,13 +107,16 @@ footer{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(
 
 <div class="card">
   <div class="grid2">
-    <div class="camwrap"><button class="primary" style="width:100%">📷 カメラで撮影</button><input id="camera" type="file" accept="image/*" capture="environment"></div>
+    <div>
+  <button id="guideCameraBtn" class="primary" style="width:100%">📐 ガイド付き撮影</button>
+  <div class="camwrap" style="margin-top:8px"><button style="width:100%;font-size:14px">標準カメラ</button><input id="camera" type="file" accept="image/*" capture="environment"></div>
+</div>
     <div class="camwrap"><button style="width:100%">写真を選ぶ</button><input id="picker" type="file" accept="image/*"></div>
   </div>
   <p class="small"><b>買い物レシートは、店名・日付・合計金額が全部入るようにレシート全体を撮影してください。</b></p>
   <img id="preview" class="hidden" alt="preview">
   <button id="ocrBtn" class="primary" style="width:100%;margin-top:10px" disabled>OCRして自動入力</button>
-  <div id="status" class="status" style="margin-top:10px">v38請求書領収金額対応版を読み込みました。請求書兼領収証・領収金額を優先します。</div>
+  <div id="status" class="status" style="margin-top:10px">v39撮影ガイド搭載版を読み込みました。ガイド枠に領収書全体を合わせて撮影してください。</div>
 </div>
 
 <div id="form-medical" class="card">
@@ -141,8 +204,30 @@ footer{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(
 <details class="card"><summary>OCR原文を見る</summary><textarea id="raw" rows="14" readonly></textarea></details>
 
 <footer>
-  <div class="camwrap"><button class="primary" style="width:100%">📷 レシート撮影</button><input id="camera2" type="file" accept="image/*" capture="environment"></div>
+  <button id="guideCameraBtn2" class="primary" style="width:100%">📐 ガイド付きレシート撮影</button>
+  <input id="camera2" type="file" accept="image/*" capture="environment" style="display:none">
 </footer>
+
+
+<div id="cameraModal" class="camera-modal" aria-hidden="true">
+  <div class="camera-stage">
+    <video id="guideVideo" playsinline autoplay muted></video>
+    <div class="camera-guide">
+      <div class="camera-hint">白枠の中に領収書全体を入れ、文字が水平になるよう合わせてください</div>
+      <div class="receipt-frame">
+        <span class="guide-v v1"></span>
+        <span class="guide-v v2"></span>
+        <span class="guide-center"></span>
+      </div>
+      <div id="cameraQuality" class="camera-quality">固定して撮影してください</div>
+    </div>
+  </div>
+  <div class="camera-controls">
+    <button id="cameraCancelBtn">キャンセル</button>
+    <button id="cameraCaptureBtn" class="capture-main">● 撮影</button>
+    <button id="cameraNativeBtn">標準カメラ</button>
+  </div>
+</div>
 
 <script>
 
@@ -569,6 +654,90 @@ function setTab(tab){
   });
 }
 ["shopping","medical","tax"].forEach(x=>$("tab-"+x).onclick=()=>setTab(x));
+
+
+let guideStream=null;
+
+async function openGuideCamera(){
+  const modal=$("cameraModal");
+  const video=$("guideVideo");
+  try{
+    if(!navigator.mediaDevices?.getUserMedia){
+      $("camera").click();
+      return;
+    }
+
+    guideStream=await navigator.mediaDevices.getUserMedia({
+      video:{
+        facingMode:{ideal:"environment"},
+        width:{ideal:1920},
+        height:{ideal:2560}
+      },
+      audio:false
+    });
+
+    video.srcObject=guideStream;
+    modal.classList.add("show");
+    modal.setAttribute("aria-hidden","false");
+    await video.play();
+    $("cameraQuality").textContent="白枠内に全体を入れて、1秒ほど静止";
+  }catch(e){
+    console.warn(e);
+    setStatus("ガイド付きカメラを開始できなかったため、標準カメラを開きます。","err");
+    $("camera").click();
+  }
+}
+
+function closeGuideCamera(){
+  const modal=$("cameraModal");
+  modal.classList.remove("show");
+  modal.setAttribute("aria-hidden","true");
+
+  if(guideStream){
+    for(const track of guideStream.getTracks())track.stop();
+    guideStream=null;
+  }
+  $("guideVideo").srcObject=null;
+}
+
+async function captureGuideCamera(){
+  const video=$("guideVideo");
+  if(!video.videoWidth||!video.videoHeight)return;
+
+  const btn=$("cameraCaptureBtn");
+  btn.disabled=true;
+  $("cameraQuality").textContent="撮影中…";
+
+  // Small delay encourages the user/device to settle after tapping.
+  await new Promise(r=>setTimeout(r,220));
+
+  const canvas=document.createElement("canvas");
+  canvas.width=video.videoWidth;
+  canvas.height=video.videoHeight;
+  const ctx=canvas.getContext("2d");
+  ctx.drawImage(video,0,0,canvas.width,canvas.height);
+
+  const blob=await new Promise(resolve=>canvas.toBlob(resolve,"image/jpeg",0.94));
+  btn.disabled=false;
+
+  if(!blob){
+    $("cameraQuality").textContent="撮影に失敗しました";
+    return;
+  }
+
+  const file=new File([blob],`receipt-${Date.now()}.jpg`,{type:"image/jpeg"});
+  closeGuideCamera();
+  onFile(file);
+}
+
+$("guideCameraBtn").onclick=openGuideCamera;
+$("guideCameraBtn2").onclick=openGuideCamera;
+$("cameraCancelBtn").onclick=closeGuideCamera;
+$("cameraCaptureBtn").onclick=captureGuideCamera;
+$("cameraNativeBtn").onclick=()=>{
+  closeGuideCamera();
+  $("camera").click();
+};
 
 function onFile(file){
   if(!file)return;
@@ -2722,7 +2891,7 @@ TEL 025-000-0000
 
   const ok=ok1&&ok2&&ok3&&ok4&&ok5&&ok6&&ok7&&ok8&&ok9&&ok10&&ok11&&ok12&&ok13&&ok14&&ok15&&ok16&&ok17&&ok18&&ok19&&ok20&&ok21&&ok22&&ok23&&ok24&&ok25&&ok26&&ok27&&ok28&&ok29&&ok30&&ok31&&ok32&&ok33&&ok34&&ok35&&ok36&&ok37&&ok38&&ok39&&ok40&&ok41&&ok42&&ok43&&ok44&&ok45&&ok46&&ok47&&ok48&&ok49;
   const el=$("selftest");
-  el.textContent=ok?"内部抽出テスト：OK（請求書＋領収金額対応）":"内部抽出テスト：要修正";
+  el.textContent=ok?"内部抽出テスト：OK（請求書＋領収金額＋撮影ガイド）":"内部抽出テスト：要修正";
   if(!ok)el.style.background="#ffecec";
   return ok;
 }
