@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#f5f5f7">
-<title>のぶ帳簿 v18 買い物合計精密版</title>
+<title>のぶ帳簿 v19 買い物精度優先版</title>
 <style>
 :root{font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif;color:#111;background:#f5f5f7}
 *{box-sizing:border-box}
@@ -30,7 +30,7 @@ footer{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(
 </style>
 </head>
 <body>
-<header><h1>のぶ帳簿 <span class="ver">v18・買い物合計精密版</span></h1></header>
+<header><h1>のぶ帳簿 <span class="ver">v19・買い物精度優先版</span></h1></header>
 
 <div class="card">
   <span id="selftest" class="badge">内部テスト中…</span><span class="badge" style="margin-left:6px">PaddleOCR不使用</span>
@@ -53,7 +53,7 @@ footer{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(
   <p class="small"><b>買い物レシートは、店名・日付・合計金額が全部入るようにレシート全体を撮影してください。</b></p>
   <img id="preview" class="hidden" alt="preview">
   <button id="ocrBtn" class="primary" style="width:100%;margin-top:10px" disabled>OCRして自動入力</button>
-  <div id="status" class="status" style="margin-top:10px">v18安定版を読み込みました。レシート全体を撮影してください。</div>
+  <div id="status" class="status" style="margin-top:10px">v19安定版を読み込みました。レシート全体を撮影してください。</div>
 </div>
 
 <div id="form-medical" class="card">
@@ -186,6 +186,16 @@ function validYMD(y,m,d){
   if(y<2000||y>2099||m<1||m>12||d<1||d>31)return "";
   const dt=new Date(y,m-1,d);
   if(dt.getFullYear()!==y||dt.getMonth()!==m-1||dt.getDate()!==d)return "";
+
+  // Receipt dates should not be wildly in the future.
+  const now=new Date();
+  const today=new Date(now.getFullYear(),now.getMonth(),now.getDate());
+  const diffDays=(dt-today)/(1000*60*60*24);
+  if(diffDays>7)return "";
+
+  // Also reject dates more than 3 years old as likely OCR noise for daily receipt capture.
+  if(diffDays < -1100)return "";
+
   return `${y}-${String(m).padStart(2,"0")}-${String(d).padStart(2,"0")}`;
 }
 function inferYearForMonthDay(m,d){
@@ -614,11 +624,25 @@ async function precisionMedicalDate(file){
 
 function safeShoppingStoreName(text){
   const lines=String(text||"").split(/\n+/).map(x=>x.trim()).filter(Boolean);
-  const bad=/(領収|レシート|合計|小計|お釣|現金|カード|税|TEL|電話|日時|取引|担当|レジ|No\.?|番号|点|病院|医院|歯科|クリニック|薬局)/i;
+  const bad=/(領収|レシート|合計|小計|お釣|現金|カード|税|TEL|電話|日時|取引|担当|レジ|No\.?|番号|点|商品|売上|登録番号|対象|内消費税|標準税率|円|¥|￥)/i;
+
+  // Only trust short, name-like lines. Random OCR fragments are left blank.
   const candidates=lines
+    .slice(0,Math.min(lines.length,12))
     .map(l=>l.replace(/[|｜]/g,"").trim())
-    .filter(l=>l.length>=2&&l.length<=28&&!bad.test(l)&&!/\d{4,}/.test(l));
-  return candidates[0]?candidates[0].replace(/\s+/g," "):"";
+    .filter(l =>
+      l.length>=2 &&
+      l.length<=24 &&
+      !bad.test(l) &&
+      !/\d{3,}/.test(l) &&
+      /[一-龯ぁ-んァ-ヶA-Za-z]/.test(l)
+    );
+
+  if(!candidates.length)return "";
+
+  // Prefer lines containing known store-name suffixes/terms.
+  const preferred=candidates.find(l=>/(店|ストア|マート|スーパー|市場|薬局|ドラッグ|MART|STORE|MOTTO)/i.test(l));
+  return (preferred||"").replace(/\s+/g," ");
 }
 
 function safeShoppingAmount(text){
@@ -687,13 +711,80 @@ function safeShoppingAmount(text){
 }
 
 
-async function precisionShoppingAmount(file){
-  // Search common total areas at high magnification. We keep labels, not just digits,
-  // because "合計/TOTAL" is the strongest evidence.
+
+function pickRepeatedShoppingAmount(numbers){
+  const counts=new Map();
+  for(const n of numbers){
+    if(!Number.isFinite(n) || n<50 || n>9999999) continue;
+    counts.set(n,(counts.get(n)||0)+1);
+  }
+  const ranked=[...counts.entries()]
+    .map(([n,count])=>({n,count,score:count*100+(n>=100?20:0)}))
+    .sort((a,b)=>b.score-a.score || b.n-a.n);
+
+  const best=ranked[0];
+  return best && best.count>=2 ? best : null;
+}
+
+async function precisionShoppingAmountByVotes(file){
+  // For many Japanese receipts the total repeats in:
+  // 合計 / 税対象 / 領収証対象金額. We exploit that repetition.
   const angles=[0,90,-90];
   const zones=[
-    [0.00,0.35,1.00,0.82],
-    [0.00,0.20,1.00,0.95],
+    [0.00,0.28,1.00,0.78],
+    [0.00,0.18,1.00,0.92],
+    [0.15,0.25,0.95,0.85],
+    [0.00,0.00,1.00,1.00]
+  ];
+
+  let best=null;
+
+  for(const angle of angles){
+    const oriented=await makeCanvas(file,"full",angle);
+    const nums=[];
+
+    for(let zi=0;zi<zones.length;zi++){
+      setStatus(`合計金額を照合中… ${angle}° ${zi+1}/${zones.length}`);
+      const z=zones[zi];
+      const part=cropCanvas(oriented,z[0],z[1],z[2],z[3],zi===3?1.1:1.7);
+      const raw=await recognizeDigits(part);
+
+      for(const n of numbersOnly(raw)){
+        // Exclude obvious cash tender/change ranges only later by voting.
+        nums.push(n);
+      }
+    }
+
+    const voted=pickRepeatedShoppingAmount(nums);
+    if(voted){
+      const cand={...voted,angle,numbers:nums};
+      if(!best || cand.score>best.score)best=cand;
+    }
+  }
+
+  await restoreTextOCR();
+  return best;
+}
+
+async function precisionShoppingAmount(file){
+  // First try repeated numeric evidence. This catches receipts where 5,126
+  // appears in 合計 / tax-target / receipt-target rows.
+  const voted=await precisionShoppingAmountByVotes(file);
+  if(voted){
+    return {
+      amount:voted.n,
+      score:voted.score+250,
+      text:`repeated amount ${voted.n} x${voted.count}`,
+      angle:voted.angle,
+      source:"vote"
+    };
+  }
+
+  // Fallback: OCR labels such as 合計/TOTAL and read nearby numbers.
+  const angles=[0,90,-90];
+  const zones=[
+    [0.00,0.30,1.00,0.82],
+    [0.00,0.18,1.00,0.95],
     [0.00,0.00,1.00,1.00]
   ];
 
@@ -704,9 +795,9 @@ async function precisionShoppingAmount(file){
   for(const angle of angles){
     const oriented=await makeCanvas(file,"full",angle);
     for(let zi=0;zi<zones.length;zi++){
-      setStatus(`合計金額を精密OCR中… ${angle}° ${zi+1}/${zones.length}`);
+      setStatus(`合計ラベルを確認中… ${angle}° ${zi+1}/${zones.length}`);
       const z=zones[zi];
-      const part=cropCanvas(oriented,z[0],z[1],z[2],z[3], zi===2 ? 1.15 : 1.8);
+      const part=cropCanvas(oriented,z[0],z[1],z[2],z[3],zi===2?1.15:1.8);
 
       await w.setParameters({
         tessedit_char_whitelist:"",
@@ -719,11 +810,9 @@ async function precisionShoppingAmount(file){
       const amount=safeShoppingAmount(raw);
 
       if(amount){
-        // Score by whether OCR actually saw a total label near the candidate.
         let score=100;
         if(/合計|TOTAL|総額|現計|お支払|支払額/i.test(raw))score+=200;
-        if(new RegExp(String(amount).split("").join("[,，\\s]*")).test(normalize(raw)))score+=50;
-        if(score>best.score)best={amount,score,text:raw,angle};
+        if(score>best.score)best={amount,score,text:raw,angle,source:"label"};
       }
     }
   }
@@ -816,8 +905,15 @@ $("ocrBtn").onclick=async()=>{
       applyParsed(combined);
 
       if(currentTab==="shopping"){
-        // Always try a dedicated total scan and override the generic amount when
-        // a total label is found. This prevents item prices from being stored as total.
+        // Accuracy-first: discard weak generic guesses before precision passes.
+        const genericName=safeShoppingStoreName(combined);
+        $("s-name").value=genericName||"";
+
+        const genericDate=parseDate(combined);
+        $("s-date").value=genericDate||"";
+
+        $("s-amount").value="";
+
         const pa=await precisionShoppingAmount(currentFile);
         if(pa){
           combined += "\n--- 合計金額精密OCR ---\n"+pa.text;
@@ -836,11 +932,13 @@ $("ocrBtn").onclick=async()=>{
       }
 
       const a=$("s-amount").value,d=$("s-date").value,n=$("s-name").value;
-      if(currentTab==="shopping" && !d){
-        setStatus(`店名「${n||"要確認"}」 / 金額 ${a? a+"円":"要確認"} は取得できましたが、購入日は写真内で確認できませんでした。
-月別集計を正しくするため、日付が写るようにレシート全体を撮影してください。`,"err");
+      if(currentTab==="shopping" && (!a || !d || !n)){
+        const got=[n&&`店名「${n}」`,d&&`日付 ${d}`,a&&`合計 ${a}円`].filter(Boolean).join(" / ");
+        setStatus(`OCR完了。${got||"確実な項目を取得できませんでした。"}
+不確かな店名・日付・金額は自動入力していません。空欄の項目だけ確認してください。`,"err");
       }else{
-        setStatus("OCR完了。"+[n&&`名称「${n}」`,d&&`日付 ${d}`,a&&`金額 ${a}円`].filter(Boolean).join(" / ")+"\n保存前に内容を確認してください。","ok");
+        setStatus(`OCR完了。店名「${n}」 / 日付 ${d} / 合計 ${a}円
+保存前に内容を確認してください。`,"ok");
       }
     }
   }catch(e){
@@ -942,12 +1040,14 @@ function runSelfTest(){
 2026/08/25 20:14`;
   const ok7=safeShoppingAmount(shopSample)===5126;
   const ok8=parseDate(shopSample)==="2026-08-25";
+  const ok9=validYMD(2035,6,25)==="";
+  const ok10=pickRepeatedShoppingAmount([1738,1903,1485,5126,5126,10000,4874,5126]).n===5126;
 
   currentTab=oldTab;
 
-  const ok=ok1&&ok2&&ok3&&ok4&&ok5&&ok6&&ok7&&ok8;
+  const ok=ok1&&ok2&&ok3&&ok4&&ok5&&ok6&&ok7&&ok8&&ok9&&ok10;
   const el=$("selftest");
-  el.textContent=ok?"内部抽出テスト：OK（医療費＋買い物合計＋日付）":"内部抽出テスト：要修正";
+  el.textContent=ok?"内部抽出テスト：OK（買い物精度優先）":"内部抽出テスト：要修正";
   if(!ok)el.style.background="#ffecec";
   return ok;
 }
