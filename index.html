@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#f5f5f7">
-<title>のぶ帳簿 v27 確定申告対応版</title>
+<title>のぶ帳簿 v28 医療費汎用OCR版</title>
 <style>
 :root{font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif;color:#111;background:#f5f5f7}
 *{box-sizing:border-box}
@@ -30,7 +30,7 @@ footer{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(
 </style>
 </head>
 <body>
-<header><h1>のぶ帳簿 <span class="ver">v27・確定申告対応版</span></h1></header>
+<header><h1>のぶ帳簿 <span class="ver">v28・医療費汎用OCR版</span></h1></header>
 
 <div class="card">
   <span id="selftest" class="badge">内部テスト中…</span><span class="badge" style="margin-left:6px">PaddleOCR不使用</span><span class="badge" style="margin-left:6px">店名学習ON</span>
@@ -53,7 +53,7 @@ footer{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(
   <p class="small"><b>買い物レシートは、店名・日付・合計金額が全部入るようにレシート全体を撮影してください。</b></p>
   <img id="preview" class="hidden" alt="preview">
   <button id="ocrBtn" class="primary" style="width:100%;margin-top:10px" disabled>OCRして自動入力</button>
-  <div id="status" class="status" style="margin-top:10px">v27確定申告対応版を読み込みました。</div>
+  <div id="status" class="status" style="margin-top:10px">v28医療費汎用OCR版を読み込みました。</div>
 </div>
 
 <div id="form-medical" class="card">
@@ -382,67 +382,129 @@ function isStrongMedicalLabel(s){
 function isWeakAmountLabel(s){
   return /(合計金額|合計|支払|領収|請求|金額)/i.test(s);
 }
+
+function medicalAmountFromLabels(text){
+  const lines=String(text||"").split(/\n+/).map(x=>normalize(x.trim())).filter(Boolean);
+  const strong=/(領収金額|領収額|今回請求額|請求額|患者負担額|自己負担額|窓口負担額|一部負担金|負担金|お支払額|支払額|合計金額|合計)/i;
+  const forbidden=/(点|負担割合|負担上限|上限|保険点数|診療報酬|電話|TEL|No\.?|番号|登録番号|税率|領収済|年月日)/i;
+
+  const candidates=[];
+
+  for(let i=0;i<lines.length;i++){
+    const line=lines[i];
+    if(!strong.test(line) || forbidden.test(line))continue;
+
+    // Same line is strongest.
+    for(const n of amountsInLine(line)){
+      if(n<10)continue;
+      candidates.push({n,score:500,line,source:"same-line-label"});
+    }
+
+    // OCR may split label/value onto next 1-2 lines.
+    for(let j=i+1;j<=Math.min(i+2,lines.length-1);j++){
+      const target=lines[j];
+      if(forbidden.test(target))continue;
+      for(const n of amountsInLine(target)){
+        if(n<10)continue;
+        candidates.push({n,score:360-(j-i)*30,line:target,source:"near-label"});
+      }
+    }
+  }
+
+  // Repetition within ONE OCR text is useful and does not depend on receipt layout.
+  const counts=new Map();
+  for(const line of lines){
+    if(forbidden.test(line))continue;
+    for(const n of amountsInLine(line)){
+      if(n<10)continue;
+      counts.set(n,(counts.get(n)||0)+1);
+    }
+  }
+
+  for(const [n,count] of counts){
+    if(count>=2){
+      candidates.push({
+        n,
+        score:260+count*90+(n>=100?30:0),
+        line:`repeated x${count}`,
+        source:"single-text-repeat"
+      });
+    }
+  }
+
+  // Currency-marked fallback, but avoid tiny numbers.
+  for(const line of lines){
+    if(forbidden.test(line))continue;
+    if(!/[円¥￥]/.test(line))continue;
+    for(const n of amountsInLine(line)){
+      if(n<50)continue;
+      candidates.push({n,score:160+(n>=100?20:0),line,source:"currency"});
+    }
+  }
+
+  candidates.sort((a,b)=>b.score-a.score || b.n-a.n);
+  return candidates[0]||null;
+}
+
+function medicalDateFromDocument(text){
+  let d=parseDate(text);
+  if(d)return d;
+
+  const s=normalize(text);
+
+  // Medical receipts sometimes stamp a Reiwa date as "08.8.10" or "08/8/10"
+  // without printing the era. Treat 01-20 as Reiwa only when receipt context exists.
+  if(/領収|診療|医療|クリニック|医院|病院|歯科|薬局/.test(s)){
+    const matches=[...s.matchAll(/(?:^|[^\d])0?([1-9]|1\d|20)[\/.\-]0?(\d{1,2})[\/.\-]0?(\d{1,2})(?:[^\d]|$)/g)];
+    for(const m of matches){
+      const iso=reiwaToISO(m[1],m[2],m[3]);
+      if(iso)return iso;
+    }
+  }
+  return "";
+}
+
 function parseMedicalAmount(text){
+  const generic=medicalAmountFromLabels(text);
+  if(generic && generic.score>=300)return generic.n;
+
   const lines=String(text||"").split(/\n+/).map(x=>normalize(x.trim())).filter(Boolean);
   const candidates=[];
   const counts={};
 
-  // Count only plausible monetary numbers from non-excluded lines.
   for(const s of lines){
-    if(excludedAmountLine(s)) continue;
+    if(excludedAmountLine(s))continue;
     for(const n of amountsInLine(s)){
-      if(n===0) continue;
+      if(n===0)continue;
       counts[n]=(counts[n]||0)+1;
     }
   }
 
-  // 1) Strong label on same line or immediately following OCR line(s).
   for(let i=0;i<lines.length;i++){
     const s=lines[i];
-    if(excludedAmountLine(s)) continue;
+    if(excludedAmountLine(s))continue;
     const strong=isStrongMedicalLabel(s);
     const weak=isWeakAmountLabel(s);
-    if(!strong&&!weak) continue;
+    if(!strong&&!weak)continue;
 
     for(let j=i;j<=Math.min(lines.length-1,i+2);j++){
       const t=lines[j];
-      if(excludedAmountLine(t)) continue;
+      if(excludedAmountLine(t))continue;
       for(const n of amountsInLine(t)){
-        if(n===0) continue;
+        if(n===0)continue;
         let score=strong?260:130;
-        if(j===i) score+=80;
-        if(/円/.test(t)) score+=60;
-        if((counts[n]||0)>=2) score+=120;
-        if(n>=100) score+=25;
-        if(n%10===0) score+=5;
+        if(j===i)score+=80;
+        if(/円/.test(t))score+=60;
+        if((counts[n]||0)>=2)score+=120;
+        if(n>=100)score+=25;
         candidates.push({n,score,line:t});
       }
     }
   }
 
-  // 2) Repeated monetary values are common in receipt total/paid rows.
-  for(let i=0;i<lines.length;i++){
-    const s=lines[i];
-    if(excludedAmountLine(s)) continue;
-    for(const n of amountsInLine(s)){
-      if(n===0) continue;
-      let score=0;
-      if(/円/.test(s)) score+=80;
-      if((counts[n]||0)>=2) score+=180;
-      if(isStrongMedicalLabel(s)) score+=260;
-      if(isWeakAmountLabel(s)) score+=100;
-      if(n>=100) score+=20;
-      // Do not guess tiny standalone numbers such as footnote "10".
-      if(n<50 && !isStrongMedicalLabel(s)) score-=250;
-      candidates.push({n,score,line:s});
-    }
-  }
-
-  candidates.sort((a,b)=>b.score-a.score || b.n-a.n);
+  candidates.sort((a,b)=>b.score-a.score||b.n-a.n);
   const best=candidates[0];
-
-  // Require real evidence. If OCR never saw a convincing amount, leave blank.
-  if(!best || best.score<120) return "";
+  if(!best || best.score<120)return "";
   return best.n;
 }
 function parseAmount(text){
@@ -632,6 +694,63 @@ async function restoreTextOCR(){
     tessedit_pageseg_mode:Tesseract.PSM.AUTO,
     preserve_interword_spaces:"1"
   });
+}
+
+
+async function precisionMedicalDocument(file){
+  // OCR the full medical receipt in several orientations/PSM modes and decide
+  // from semantic labels instead of a fixed coordinate box.
+  const angles=[0,90,-90];
+  const psms=[Tesseract.PSM.AUTO,Tesseract.PSM.SPARSE_TEXT];
+  const texts=[];
+  let bestAmount=null,bestDate="",bestName="";
+
+  await restoreTextOCR();
+  const w=await ensureWorker();
+
+  for(const angle of angles){
+    const oriented=await makeCanvas(file,"full",angle);
+
+    for(let pi=0;pi<psms.length;pi++){
+      setStatus(`医療費を汎用OCR中… ${angle}° ${pi+1}/${psms.length}`);
+
+      await w.setParameters({
+        tessedit_char_whitelist:"",
+        tessedit_pageseg_mode:psms[pi],
+        preserve_interword_spaces:"1"
+      });
+
+      const r=await w.recognize(oriented,{rotateAuto:false});
+      const raw=r.data.text||"";
+      texts.push(raw);
+
+      const amount=medicalAmountFromLabels(raw);
+      const date=medicalDateFromDocument(raw);
+      const name=parseName(raw);
+
+      if(amount && (!bestAmount || amount.score>bestAmount.score))bestAmount=amount;
+      if(!bestDate && date)bestDate=date;
+      if(!bestName && name)bestName=name;
+
+      if(bestAmount && bestAmount.score>=500 && bestDate && bestName){
+        await restoreTextOCR();
+        return {
+          amount:bestAmount.n,date:bestDate,name:bestName,
+          text:texts.join("\n--- medical pass ---\n"),
+          angle
+        };
+      }
+    }
+  }
+
+  await restoreTextOCR();
+  return {
+    amount:bestAmount?.score>=300?bestAmount.n:"",
+    date:bestDate,
+    name:bestName,
+    text:texts.join("\n--- medical pass ---\n"),
+    angle:0
+  };
 }
 
 async function precisionMedicalAmount(file){
@@ -1461,17 +1580,30 @@ $("ocrBtn").onclick=async()=>{
     combined += "\n--- 右側金額欄 ---\n"+await recognize(right,false);
 
     if(currentTab==="medical"){
-      // Precision numeric pass. It overrides the normal OCR only with repeated evidence.
-      const precise=await precisionMedicalAmount(currentFile);
+      // Generic medical-document pass first. This works across different receipt layouts.
+      const genericMed=await precisionMedicalDocument(currentFile);
+      if(genericMed.text) combined += "\n--- 医療費汎用OCR ---\n"+genericMed.text;
 
-      if(precise){
-        const header=await precisionMedicalName(currentFile,precise.angle);
+      let precise=null;
+      if(!genericMed.amount){
+        precise=await precisionMedicalAmount(currentFile);
+      }
+
+      if(genericMed.amount || precise){
+        const resolvedAmount=genericMed.amount || precise.n;
+        const resolvedAngle=genericMed.amount ? genericMed.angle : precise.angle;
+
+        const header=genericMed.name
+          ? {name:genericMed.name,text:""}
+          : await precisionMedicalName(currentFile,resolvedAngle);
+
         if(header.text) combined += "\n--- 医療機関名重点OCR ---\n"+header.text;
 
         applyParsed(combined);
 
         if(header.name) $("m-name").value=header.name;
-        $("m-amount").value=precise.n;
+        if(genericMed.date) $("m-date").value=genericMed.date;
+        $("m-amount").value=resolvedAmount;
 
         // Date gets its own precision pass if the full OCR missed it.
         if(!$("m-date").value){
@@ -1770,12 +1902,19 @@ function runSelfTest(){
   const falseLabel={amount:4874,confidence:1000,source:"same-line-total"};
   const ok22=chooseShoppingAmountFinal("合計? お釣り 4874",falseLabel,eq).amount===5126;
   const ok23=chooseShoppingAmountFinal("合計? お釣り 4874",falseLabel,eq).source==="arithmetic-first";
+  const medGeneric=`療クリニック
+領収金額 920円
+一部負担金 920円
+08.8.10 領収済
+診療報酬 461点`;
+  const ok24=medicalAmountFromLabels(medGeneric).n===920;
+  const ok25=medicalDateFromDocument(medGeneric)==="2026-08-10";
 
   currentTab=oldTab;
 
-  const ok=ok1&&ok2&&ok3&&ok4&&ok5&&ok6&&ok7&&ok8&&ok9&&ok10&&ok11&&ok12&&ok13&&ok14&&ok15&&ok16&&ok17&&ok18&&ok19&&ok20&&ok21&&ok22&&ok23;
+  const ok=ok1&&ok2&&ok3&&ok4&&ok5&&ok6&&ok7&&ok8&&ok9&&ok10&&ok11&&ok12&&ok13&&ok14&&ok15&&ok16&&ok17&&ok18&&ok19&&ok20&&ok21&&ok22&&ok23&&ok24&&ok25;
   const el=$("selftest");
-  el.textContent=ok?"内部抽出テスト：OK（確定申告対応）":"内部抽出テスト：要修正";
+  el.textContent=ok?"内部抽出テスト：OK（確定申告＋医療費汎用OCR）":"内部抽出テスト：要修正";
   if(!ok)el.style.background="#ffecec";
   return ok;
 }
