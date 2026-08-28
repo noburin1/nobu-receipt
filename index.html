@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#f5f5f7">
-<title>のぶ帳簿 v25 数値会計検算版</title>
+<title>のぶ帳簿 v26 会計式最優先版</title>
 <style>
 :root{font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif;color:#111;background:#f5f5f7}
 *{box-sizing:border-box}
@@ -30,7 +30,7 @@ footer{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(
 </style>
 </head>
 <body>
-<header><h1>のぶ帳簿 <span class="ver">v25・数値会計検算版</span></h1></header>
+<header><h1>のぶ帳簿 <span class="ver">v26・会計式最優先版</span></h1></header>
 
 <div class="card">
   <span id="selftest" class="badge">内部テスト中…</span><span class="badge" style="margin-left:6px">PaddleOCR不使用</span><span class="badge" style="margin-left:6px">店名学習ON</span>
@@ -53,7 +53,7 @@ footer{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(
   <p class="small"><b>買い物レシートは、店名・日付・合計金額が全部入るようにレシート全体を撮影してください。</b></p>
   <img id="preview" class="hidden" alt="preview">
   <button id="ocrBtn" class="primary" style="width:100%;margin-top:10px" disabled>OCRして自動入力</button>
-  <div id="status" class="status" style="margin-top:10px">v25安定版を読み込みました。合計は数字だけでも会計式を検算します。</div>
+  <div id="status" class="status" style="margin-top:10px">v26安定版を読み込みました。預り−お釣りの会計式を最優先します。</div>
 </div>
 
 <div id="form-medical" class="card">
@@ -785,45 +785,49 @@ function findAccountingEquation(nums){
   const set=new Set(arr);
   const candidates=[];
 
-  // Find tender - change = total.
-  // Prefer a large round tender, smaller change, and a plausible total.
   for(const tender of arr){
-    if(tender<500)continue;
+    // Typical cash tender must be a reasonably large denomination.
+    if(tender<1000)continue;
+
+    const tenderRound =
+      tender%10000===0 ? 320 :
+      tender%5000===0  ? 280 :
+      tender%1000===0  ? 240 :
+      tender%500===0   ? 160 :
+      tender%100===0   ? 80 : 0;
+
+    if(tenderRound===0)continue;
 
     for(const change of arr){
-      if(change<=0 || change>=tender)continue;
+      if(change<1 || change>=tender)continue;
 
       const total=tender-change;
       if(total<50 || total>9999999)continue;
 
-      let score=0;
+      let score=tenderRound;
 
-      // Strong evidence when the computed total itself was OCR-read.
-      if(set.has(total))score+=500;
+      // Best evidence: the computed total was also OCR-read elsewhere.
+      if(set.has(total))score+=700;
 
-      // Cash tender is often a round denomination.
-      if(tender%1000===0)score+=180;
-      else if(tender%500===0)score+=120;
-      else if(tender%100===0)score+=50;
+      // Prefer tender as the largest or one of the largest values.
+      if(tender===arr[arr.length-1])score+=180;
+      else if(tender>=arr[Math.max(0,arr.length-2)])score+=100;
 
-      // Change is normally less than tender.
-      if(change<tender)score+=40;
+      // Change often looks like a non-round amount.
+      if(change%1000!==0)score+=60;
 
-      // Retail totals are usually not rounder than the tender.
-      if(total%1000!==0)score+=25;
-
-      // Prefer tender among the largest detected numbers.
-      if(tender===arr[arr.length-1])score+=80;
+      // The total is usually smaller than tender and not tiny.
+      if(total>=100)score+=40;
 
       candidates.push({tender,change,total,score});
     }
   }
 
-  candidates.sort((a,b)=>b.score-a.score || a.total-b.total);
+  candidates.sort((a,b)=>b.score-a.score || b.total-a.total);
   const best=candidates[0];
 
-  // Require meaningful evidence so random item-price subtraction is not accepted.
-  if(!best || best.score<300)return null;
+  // Require strong arithmetic evidence.
+  if(!best || best.score<500)return null;
   return best;
 }
 
@@ -867,24 +871,34 @@ async function precisionShoppingArithmetic(file){
 }
 
 function chooseShoppingAmountFinal(text,semanticCandidate,arithmeticCandidate){
-  // 1) Explicit "合計" label remains strongest when it is plausible.
-  const label=shoppingTotalFromLabel(text);
-  if(label && label.amount>=50){
-    // If arithmetic independently agrees, confidence is maximal.
-    if(arithmeticCandidate && arithmeticCandidate.total===label.amount){
-      return {amount:label.amount,source:"label+arithmetic",confidence:1600};
-    }
-    return {amount:label.amount,source:"label",confidence:1200};
+  // 1) Accounting identity has the highest priority when we have a credible
+  // tender - change = total relationship. This prevents "お釣り 4,874" from
+  // being mistaken for the total when OCR corrupts the 合計 label.
+  if(arithmeticCandidate && arithmeticCandidate.score>=300){
+    return {
+      amount:arithmeticCandidate.total,
+      source:"arithmetic-first",
+      confidence:1500
+    };
   }
 
-  // 2) Numeric accounting identity is next.
-  if(arithmeticCandidate){
-    return {amount:arithmeticCandidate.total,source:"arithmetic",confidence:1100};
+  // 2) Explicit total label only when arithmetic evidence is unavailable.
+  const label=shoppingTotalFromLabel(text);
+  if(label && label.amount>=50){
+    return {
+      amount:label.amount,
+      source:"label-fallback",
+      confidence:1200
+    };
   }
 
   // 3) Existing semantic candidate only after those.
   if(semanticCandidate && semanticCandidate.amount>=50){
-    return {amount:semanticCandidate.amount,source:"semantic-fallback",confidence:700};
+    return {
+      amount:semanticCandidate.amount,
+      source:"semantic-fallback",
+      confidence:700
+    };
   }
 
   return null;
@@ -902,12 +916,12 @@ function resolveShoppingAmountAccounting(text){
   // 2) Accounting identity: tender - change = actual paid total.
   const tender=labeledAmountFromLines(
     raw,
-    /(現金お預り|現金預り|お預り|お預かり|預り|預かり)/i,
+    /(現金.?預|現金.?預り|現金.?預かり|お.?預り|お.?預かり|預り|預かり)/i,
     /(お釣|釣銭|つり)/i
   );
   const change=labeledAmountFromLines(
     raw,
-    /(お釣り|お釣|釣銭|つり)/i
+    /(お.?釣り|お.?釣|釣銭|つり)/i
   );
 
   if(tender && change && tender>change){
@@ -1114,10 +1128,12 @@ async function precisionShoppingAmount(file,baseText=""){
   // A) Semantic pass from the already-recognized text.
   const semantic=resolveShoppingAmountAccounting(baseText);
 
-  // B) Independent digit-only accounting pass.
+  // B) Independent digit-only accounting pass. This is deliberately run
+  // every time because it is the strongest defense against confusing
+  // "お釣り" with "合計".
   const arithmetic=await precisionShoppingArithmetic(file);
 
-  // C) If either gives a strong answer, choose using fixed precedence.
+  // C) Arithmetic identity takes precedence over label OCR.
   const chosen=chooseShoppingAmountFinal(baseText,semantic,arithmetic);
   if(chosen){
     return {
@@ -1638,12 +1654,15 @@ function runSelfTest(){
   const eq=findAccountingEquation([1738,1903,1485,5126,466,10000,4874]);
   const ok20=eq.total===5126 && eq.tender===10000 && eq.change===4874;
   const ok21=chooseShoppingAmountFinal("",null,eq).amount===5126;
+  const falseLabel={amount:4874,confidence:1000,source:"same-line-total"};
+  const ok22=chooseShoppingAmountFinal("合計? お釣り 4874",falseLabel,eq).amount===5126;
+  const ok23=chooseShoppingAmountFinal("合計? お釣り 4874",falseLabel,eq).source==="arithmetic-first";
 
   currentTab=oldTab;
 
-  const ok=ok1&&ok2&&ok3&&ok4&&ok5&&ok6&&ok7&&ok8&&ok9&&ok10&&ok11&&ok12&&ok13&&ok14&&ok15&&ok16&&ok17&&ok18&&ok19&&ok20&&ok21;
+  const ok=ok1&&ok2&&ok3&&ok4&&ok5&&ok6&&ok7&&ok8&&ok9&&ok10&&ok11&&ok12&&ok13&&ok14&&ok15&&ok16&&ok17&&ok18&&ok19&&ok20&&ok21&&ok22&&ok23;
   const el=$("selftest");
-  el.textContent=ok?"内部抽出テスト：OK（店名学習＋数値会計検算）":"内部抽出テスト：要修正";
+  el.textContent=ok?"内部抽出テスト：OK（店名学習＋会計式最優先）":"内部抽出テスト：要修正";
   if(!ok)el.style.background="#ffecec";
   return ok;
 }
