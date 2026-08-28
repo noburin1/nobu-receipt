@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#111827"><meta name="apple-mobile-web-app-capable" content="yes">
-<link rel="manifest" href="./manifest.webmanifest"><title>のぶ帳簿 v3</title>
+<link rel="manifest" href="./manifest.webmanifest"><title>のぶ帳簿 v4</title>
 <style>
 body{font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif;background:#f3f4f6;color:#111827;margin:0}
 main{max-width:760px;margin:auto;padding:16px}.card{background:#fff;border-radius:16px;padding:16px;margin:12px 0;box-shadow:0 1px 8px #0001}
@@ -18,7 +18,7 @@ label{display:block;font-weight:700;margin:12px 0 6px}img{width:100%;max-height:
 </style>
 </head>
 <body><main>
-<h1>🧾 のぶ帳簿 <span class="small">v3</span></h1><p class="sub">医療領収書の店名・日付・支払額を再強化</p>
+<h1>🧾 のぶ帳簿 <span class="small">v4</span></h1><p class="sub">医療領収書の支払金額判定を強化</p>
 <section class="card">
 <label class="camera" for="camera">📷 レシート・領収書を撮影</label>
 <input id="camera" type="file" accept="image/*" capture="environment">
@@ -102,27 +102,68 @@ function parseDate(t){
 function getNums(l){return [...l.matchAll(/(?:¥|￥)?\s*([0-9][0-9,]{0,9})(?:\s*円)?/g)].map(m=>+m[1].replace(/,/g,"")).filter(n=>Number.isFinite(n)&&n>0&&n<10000000)}
 function parseAmount(t){
   let ls=norm(t).split("\n").map(s=>s.trim()).filter(Boolean), cand=[];
+
+  function addCandidate(n,score,i,why){
+    if(!Number.isFinite(n) || n<=0 || n>=10000000) return;
+    cand.push({n,score,i,why});
+  }
+
   for(let i=0;i<ls.length;i++){
-    let context=[ls[i-1]||"",ls[i],ls[i+1]||"",ls[i+2]||""].join(" ");
-    for(let n of getNums(ls[i])){
-      let s=0;
-      if(/領収額合計|領収額|領収金額|領収.*合計/.test(context))s+=160;
-      if(/支払額|お支払|支払金額|お会計/.test(context))s+=130;
-      if(/負担額/.test(context))s+=90;
-      if(/合計/.test(context))s+=65;
-      if(/請求額/.test(context))s+=45;
-      if(/上限|限度額|負担割合|%/.test(context))s-=120;
-      if(/点/.test(ls[i]))s-=80;
-      if(n>=10000 && /上限|限度/.test(context))s-=100;
-      if(n<=9999)s+=10; // typical out-of-pocket medical receipt amount
-      cand.push({n,s,i});
+    let line=ls[i];
+    let before=ls[i-1]||"", after=ls[i+1]||"", after2=ls[i+2]||"";
+    let context=[before,line,after,after2].join(" ");
+
+    // 重要: 「63点」「184点」など診療報酬点数は金額候補から完全除外
+    if(/(^|\s)\d[\d,]*\s*点/.test(line) && !/円|¥|￥/.test(line)) continue;
+
+    // 「円」が読めた数字は最優先
+    let yenMatches=[...line.matchAll(/(?:¥|￥)?\s*([0-9][0-9,]{0,9})\s*円/g)];
+    for(let m of yenMatches){
+      let n=+m[1].replace(/,/g,""), s=50;
+      if(/領収額合計|領収額|領収金額|領収.*合計/.test(context))s+=220;
+      if(/支払額|お支払|支払金額|お会計/.test(context))s+=180;
+      if(/負担額/.test(context))s+=130;
+      if(/合計/.test(context))s+=100;
+      if(/請求額/.test(context))s+=60;
+      if(/上限|限度額|負担割合|%/.test(context))s-=180;
+      if(/点/.test(line))s-=160;
+      addCandidate(n,s,i,"yen");
+    }
+
+    // 円記号がOCRで落ちた場合。領収/合計/負担の近傍だけ数字を候補化
+    if(/領収額合計|領収額|領収金額|支払額|支払金額|負担額|合計/.test(context)){
+      let nums=[...line.matchAll(/\b([0-9][0-9,]{1,8})\b/g)]
+        .map(m=>+m[1].replace(/,/g,""));
+      for(let n of nums){
+        let s=20;
+        if(/領収額合計|領収額|領収金額/.test(context))s+=180;
+        if(/支払額|支払金額/.test(context))s+=150;
+        if(/負担額/.test(context))s+=100;
+        if(/合計/.test(context))s+=80;
+        if(/点/.test(line))s-=180;
+        if(/%|上限|限度額/.test(context))s-=180;
+        addCandidate(n,s,i,"context");
+      }
     }
   }
-  cand.sort((a,b)=>b.s-a.s || b.i-a.i);
-  if(cand.length&&cand[0].s>=50)return cand[0].n;
-  // fallback: bottom-most small monetary-looking number, excluding obvious point counts and receipt numbers
-  let fallback=cand.filter(x=>x.n<10000&&x.n>=10);
-  return fallback.length?fallback[fallback.length-1].n:"";
+
+  // 同じ金額が複数回読まれた場合は強く加点。
+  // この種の医療領収書では「負担額」と「領収額合計」に同額が出ることが多い。
+  const freq={};
+  for(const c of cand) freq[c.n]=(freq[c.n]||0)+1;
+  for(const c of cand){
+    if(freq[c.n]>=2) c.score += 120;
+    if(c.n<10) c.score -= 80;
+  }
+
+  cand.sort((a,b)=>b.score-a.score || b.i-a.i);
+
+  // 点数誤認識を絶対に採用しない
+  let best=cand.find(c=>{
+    const line=ls[c.i]||"";
+    return !(/\b\d[\d,]*\s*点/.test(line) && !/円|¥|￥/.test(line));
+  });
+  return best ? best.n : "";
 }
 function detectCat(t,s){let x=t+" "+s;if(/歯科|病院|医院|クリニック|診療所|医療/.test(x))return"医療費";if(/薬局|ドラッグ/.test(x))return"薬局";return"買い物"}
 async function process(f){
@@ -142,6 +183,6 @@ $("save").onclick=()=>{let r={id:Date.now(),shop:$("shop").value.trim(),date:$("
 function yen(n){return new Intl.NumberFormat("ja-JP",{style:"currency",currency:"JPY",maximumFractionDigits:0}).format(n||0)}
 function render(){let d=JSON.parse(localStorage.getItem(KEY)||"[]"),y=new Date().getFullYear();$("yearTotal").textContent=yen(d.filter(r=>String(r.date).startsWith(y)).reduce((a,r)=>a+r.amount,0));$("medicalTotal").textContent=yen(d.filter(r=>String(r.date).startsWith(y)&&["医療費","薬局","通院交通費"].includes(r.category)).reduce((a,r)=>a+r.amount,0));$("records").innerHTML=d.length?'<table><tr><th>日付</th><th>名称</th><th>分類</th><th>金額</th></tr>'+d.map(r=>`<tr><td>${r.date}</td><td>${r.shop}</td><td>${r.category}</td><td>${yen(r.amount)}</td></tr>`).join("")+"</table>":'<p class="small">まだ登録はありません。</p>'}
 $("toggleDebug").onclick=()=>{$("debug").hidden=!$("debug").hidden}
-if("serviceWorker" in navigator)addEventListener("load",()=>navigator.serviceWorker.register("./sw.js?v=3").catch(console.error));render();
+if("serviceWorker" in navigator)addEventListener("load",()=>navigator.serviceWorker.register("./sw.js?v=4").catch(console.error));render();
 </script>
 </main></body></html>
