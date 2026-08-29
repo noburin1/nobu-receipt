@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#f5f5f7">
-<title>のぶ帳簿 完成版 v54 支払先名補正・保存回帰検証済み</title>
+<title>のぶ帳簿 完成版 v55 合計請求額対応・保存検証済み</title>
 <style>
 :root{font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif;color:#111;background:#f5f5f7}
 *{box-sizing:border-box}
@@ -90,7 +90,7 @@ footer{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(
 </style>
 </head>
 <body>
-<header><h1>のぶ帳簿 <span class="ver">完成版 v54・支払先名補正・保存回帰検証済み</span></h1></header>
+<header><h1>のぶ帳簿 <span class="ver">完成版 v55・合計請求額対応・保存検証済み</span></h1></header>
 
 <div class="card">
   <span id="selftest" class="badge">内部テスト中…</span><span class="badge" style="margin-left:6px">PaddleOCR不使用</span><span class="badge" style="margin-left:6px">店名学習ON</span>
@@ -116,7 +116,7 @@ footer{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(
   <p class="small"><b>買い物レシートは、店名・日付・合計金額が全部入るようにレシート全体を撮影してください。</b></p>
   <img id="preview" class="hidden" alt="preview">
   <button id="ocrBtn" class="primary" style="width:100%;margin-top:10px" disabled>OCRして自動入力</button>
-  <div id="status" class="status" style="margin-top:10px">v54支払先名補正・保存回帰検証版を読み込みました。領収額合計を最優先にし、会計ラベルを支払先名から除外します。</div>
+  <div id="status" class="status" style="margin-top:10px">v55合計請求額対応・保存検証版を読み込みました。領収額合計と合計請求額を最優先にし、会計ラベルを支払先名から除外します。</div>
 </div>
 
 <div id="form-medical" class="card">
@@ -131,7 +131,7 @@ footer{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(
     <option value="介護保険サービス">介護保険サービス</option>
     <option value="その他の医療費">その他の医療費</option>
   </select>
-  <label>支払額（領収額合計・円）</label><input id="m-amount" inputmode="numeric" placeholder="例：370">
+  <label>支払額（領収額合計・合計請求額・円）</label><input id="m-amount" inputmode="numeric" placeholder="例：370">
   <label>保険金・高額療養費などで補てんされる額（円）</label>
   <input id="m-reimb" inputmode="numeric" value="0">
   <button id="saveMedical" class="primary" style="width:100%;margin-top:12px">医療費として保存</button>
@@ -230,7 +230,7 @@ footer{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(
 </div>
 
 <script>
-const APP_VERSION="v52";
+const APP_VERSION="v55";
 
 // Remove legacy service workers/caches from older PaddleOCR/PWA builds.
 // Bookkeeping data in localStorage is intentionally preserved.
@@ -264,7 +264,7 @@ const RECEIPT_LEARNING_SEEDS={
     "大通り歯科":{
       type:"medical",
       provider:"大通り歯科",
-      known_labels:["領収額合計","お支払額","負担額"],
+      known_labels:["領収額合計","合計請求額","お支払額","負担額"],
       reject_tokens:["点","負担上限","負担割合"],
       examples:[{date:"2026-08-12",amount:370,confirmed:true}]
     },
@@ -903,7 +903,7 @@ function amountsInLine(s){
   return out;
 }
 function isStrongMedicalLabel(s){
-  return /(自己負担額|患者負担額|窓口負担額|領収額合計|領収金額|領収額|お支払(?:い)?額|支払額|負担額|請求額|現計|総額)/i.test(s);
+  return /(自己負担額|患者負担額|窓口負担額|領収額合計|合計請求額|領収金額|領収額|お支払(?:い)?額|支払額|負担額|請求額|現計|総額)/i.test(s);
 }
 function isWeakAmountLabel(s){
   return /(合計金額|合計|支払|領収|請求|金額)/i.test(s);
@@ -941,12 +941,13 @@ function extractMedicalPointValues(text){
 }
 
 function medicalAmountFromLabels(text){
-  const lines=String(text||"").split(/\n+/).map(x=>normalize(x.trim())).filter(Boolean);
-  const pointValues=extractMedicalPointValues(text);
+  const moneyText=normalizeMedicalMoneyTextV55(text);
+  const lines=moneyText.split(/\n+/).map(x=>normalize(x.trim())).filter(Boolean);
+  const pointValues=extractMedicalPointValues(moneyText);
 
   const labels=[
-    {re:/請求書兼領収証.*領収金額|領収金額/i,score:2400,source:"invoice-receipt-amount"},
-    {re:/請求書.*領収金額|領収額合計|領収額/i,score:2200,source:"invoice-receipt-total"},
+    {re:/請求書兼領収証.*(?:領収金額|合計請求額)|領収金額|合計請求額/i,score:2400,source:"invoice-receipt-amount"},
+    {re:/請求書.*(?:領収金額|合計請求額)|領収額合計|合計請求額|領収額/i,score:2200,source:"invoice-receipt-total"},
     {re:/一部負担金|患者負担額|自己負担額|窓口負担額/i,score:2000,source:"patient-copay"},
     {re:/今回請求額|請求額|請求金額|お支払額|支払額|負担額/i,score:1800,source:"billing-payment"},
     {re:/合計金額/i,score:1600,source:"total"}
@@ -2325,6 +2326,8 @@ function providerV49(text){
   // Verified numbers printed on the two supplied 奈良心療クリニック forms.
   // This is provider identity only; it never seeds or guesses money/date.
   if(digits.includes("0252400425")||digits.includes("0252407977"))return "奈良心療クリニック";
+  // Verified receipt: なかだクリニック. OCR may confuse the digit 1 in 7010 as j/I/l.
+  if(digits.includes("0252827010") || /025\D*282\D*70[1jIl|]0/i.test(t))return "なかだクリニック";
   return "";
 }
 
@@ -2338,7 +2341,7 @@ function wideAmountFromTextV49(text){
   const pointValues=extractMedicalPointValues(raw);
   const candidates=[];
   const scoreLabel=(line)=>{
-    if(/領収額合計|領収金額合計/.test(line))return 6000;
+    if(/領収額合計|領収金額合計|合計請求額/.test(line))return 6000;
     if(/領収金額|領収額/.test(line))return 5600;
     if(/一部負担金|患者負担額|自己負担額|窓口負担額/.test(line))return 5200;
     if(/負担額/.test(line))return 5000;
@@ -2394,7 +2397,7 @@ async function precisionMedicalWideReceiptV49(page){
   let date=reiwaDateAllV49(hd)||relaxedReiwaDateV47(hd)||medicalReceiptDateFromLabels(hd)||"";
 
   // Pass 2: payment box only. Treatment-detail points are geometrically outside.
-  setStatus("領収額合計を確認中… 2/2");
+  setStatus("領収額合計 / 合計請求額を確認中… 2/2");
   const at=await recognizeRegionV49(w,page,[.44,.36,1.00,.76],PSM.SPARSE_TEXT,1700,"grayscale(1) contrast(185%)");
   raw+="\n--- FINAL 支払額ボックス ---\n"+at;
   let amount=wideAmountFromTextV50(at)||amountFromReceiptBoxV48(at)||wideAmountFromTextV50(orientationMeta?.text||"")||"";
@@ -2491,7 +2494,7 @@ function sanitizeProviderNameV54(name){
     .trim();
 
   // OCR may concatenate accounting/tax headings immediately before a provider name.
-  const leadingNoise=/^(?:(?:外税額|内税額|外税|内税|課税額|非課税額|消費税額|消費税|税額|領収額合計|領収金額合計|領収金額|領収額|支払額|お支払額|請求額|請求金額|今回請求額|今回収受額|負担額|患者負担額|自己負担額|窓口負担額|合計金額|合計)[\s:：・\-]*)+/;
+  const leadingNoise=/^(?:(?:外税額|内税額|外税|内税|課税額|非課税額|消費税額|消費税|税額|領収額合計|領収金額合計|合計請求額|領収金額|領収額|支払額|お支払額|請求額|請求金額|今回請求額|今回収受額|負担額|患者負担額|自己負担額|窓口負担額|合計金額|合計)[\s:：・\-]*)+/;
   let prev="";
   while(prev!==s){ prev=s; s=s.replace(leadingNoise,"").trim(); }
   s=s.replace(/^(?:金額|円|額)[\s:：・\-]+/,"").trim();
@@ -2511,15 +2514,28 @@ function providerV50(text){
   return sanitizeProviderNameV54(providerV49(raw));
 }
 
-function receiptTotalAmountV51(text){
-  const raw=String(text||"")
+function normalizeMedicalMoneyTextV55(text){
+  let s=String(text||"")
     .replace(/[ＯO〇]/g,"0")
-    .replace(/[，、]/g,",");
+    .replace(/[ＤD]/g,"0")
+    .replace(/[，、]/g,",")
+    .replace(/合計請求(?:拓|頼|顕|箱|項|頷|頬|額)/g,"合計請求額")
+    .replace(/今回請求(?:拓|頼|顕|箱|項|頷|頬|額)/g,"今回請求額")
+    .replace(/前回請求(?:拓|頼|顕|箱|項|頷|頬|額)/g,"前回請求額")
+    .replace(/領収(?:拓|頼|顕|箱|項|頷|頬|額)合計/g,"領収額合計");
+  // OCR sometimes inserts spaces between every digit: "7 6 0 円" -> "760 円".
+  let prev="";
+  while(prev!==s){ prev=s; s=s.replace(/(\d)\s+(?=\d)/g,"$1"); }
+  return s;
+}
+
+function receiptTotalAmountV51(text){
+  const raw=normalizeMedicalMoneyTextV55(text);
   const lines=raw.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
   const pointValues=extractMedicalPointValues(raw);
   for(let i=0;i<lines.length;i++){
     const label=lines[i].replace(/[\s　|｜:：]/g,"");
-    if(!/領収額合計|領収金額合計/.test(label))continue;
+    if(!/領収額合計|領収金額合計|合計請求額/.test(label))continue;
     for(let k=0;k<=2;k++){
       const target=(lines[i+k]||"").replace(/[ＯO〇]/g,"0");
       if(/点|点数|診療報酬|保険点数|総点数|請求点数/.test(target))break;
@@ -2533,10 +2549,10 @@ function receiptTotalAmountV51(text){
 }
 
 function wideAmountFromTextV50(text){
-  const raw=String(text||"").replace(/[ＯO〇]/g,"0").replace(/[ＢB]/g,"8").replace(/[ＳS]/g,"5");
+  const raw=normalizeMedicalMoneyTextV55(text).replace(/[ＢB]/g,"8").replace(/[ＳS]/g,"5");
   const lines=raw.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
   const pointValues=extractMedicalPointValues(raw);const cand=[];
-  const scoreLabel=(c)=>/領収額合計|領収金額合計/.test(c)?7000:/領収金額|領収額/.test(c)?6600:/一部負担金|患者負担額|自己負担額|窓口負担額|負担額/.test(c)?6200:/支払額|お支払額|今回請求額/.test(c)?5800:/^合計$/.test(c)?3000:0;
+  const scoreLabel=(c)=>/領収額合計|領収金額合計|合計請求額/.test(c)?7000:/領収金額|領収額/.test(c)?6600:/一部負担金|患者負担額|自己負担額|窓口負担額|負担額/.test(c)?6200:/支払額|お支払額|今回請求額/.test(c)?5800:/^合計$/.test(c)?3000:0;
   for(let i=0;i<lines.length;i++){
     const compact=lines[i].replace(/\s+/g,"");if(/点|点数|診療報酬|保険点数|総点数|請求点数/.test(compact))continue;
     const base=scoreLabel(compact);if(!base)continue;
@@ -2586,7 +2602,7 @@ async function precisionMedicalTallReceiptV50(page,orientationMeta){
   const stamp=detected?{x:detected.x*up.scale,y:detected.y*up.scale,w:detected.w*up.scale,h:detected.h*up.scale}:null;
   let raw=`--- v50向き判定 ${orientationMeta?.angle||0}deg score=${orientationMeta?.score||0} ---\n${orientationMeta?.text||""}\n`,name="",date="",amount="";
   if(stamp){
-    setStatus("会計金額を確認中… 1/3");const a=await readNaraAmountByStampV45(base,stamp);amount=a.n||"";raw+="\n--- 支払額専用ROI ---\n"+a.text;
+    setStatus("会計金額（領収額合計 / 合計請求額）を確認中… 1/3");const a=await readNaraAmountByStampV45(base,stamp);amount=a.n||"";raw+="\n--- 支払額専用ROI ---\n"+a.text;
     setStatus("領収日を確認中… 2/3");const d=await readNaraDateByStampV45(base,stamp);date=d.date||"";raw+="\n--- 赤色領収印専用ROI ---\n"+d.text;
   }
   setStatus("医療機関名を確認中… 3/3");await restoreTextOCR();const w=await ensureWorker();
@@ -2621,7 +2637,7 @@ async function precisionMedicalDocumentV45(file){
   let raw="",name="",date="",amount="";
 
   if(stamp){
-    setStatus("会計金額を確認中… 1/3");
+    setStatus("会計金額（領収額合計 / 合計請求額）を確認中… 1/3");
     const a=await readNaraAmountByStampV45(base,stamp);
     amount=a.n||"";raw+="--- 支払額専用ROI ---\n"+a.text;
 
@@ -4038,11 +4054,39 @@ TEL 025-000-0000
   const ok69=wideAmountFromTextV50("診療報酬点数 315点\n負担 額\n890 円\n領収 額 合計\n890 円")===890;
   const ok70=wideAmountFromTextV50("診療報酬点数 315点\n315 円")!==315;
 
+  // v55: 合計請求額 + OCR-confusion + spaced digits regression.
+  const v55Invoice=`診療費請求書兼領収書
+発行日 令和 8年 8月 3
+合計点数 3 8 0点
+今回請求額 7 6 0円
+合計請求額 7 6 0円
+今回入金額 7 6 0円
+なかだクリニック
+電話 025-282-7010`;
+  const ok73=receiptTotalAmountV51(v55Invoice)===760;
+  const ok74=medicalAmountFromLabels(v55Invoice)?.n===760;
+  const ok75=reiwaDateAllV49(v55Invoice)==="2026-08-03";
+  const ok76=providerV50(v55Invoice)==="なかだクリニック";
+  const ok77=extractMedicalPointValues(normalizeMedicalMoneyTextV55(v55Invoice)).has(380);
+  const v55OcrConfused=`診療費請求書捕領収書
+発行日 令和 8年 8月 3
+合計 3 8 0点
+今回請求頼 7 6 0|
+合計請求拓 7 6 0RI
+今回入金額 7 6 0箇
+電話 025-282-70j0`;
+  const ok78=receiptTotalAmountV51(v55OcrConfused)===760;
+  const ok79=medicalAmountFromLabels(v55OcrConfused)?.n===760;
+  const ok80=reiwaDateAllV49(v55OcrConfused)==="2026-08-03";
+  const ok81=providerV50(v55OcrConfused)==="なかだクリニック";
+  const ok82=receiptTotalAmountV51("合計点数 380点\n合計請求額 760円")===760;
+  const ok83=receiptTotalAmountV51("合計点数 315点\n合計請求額 760円")===760;
+
   currentTab=oldTab;
 
-  const ok=ok1&&ok2&&ok3&&ok4&&ok5&&ok6&&ok7&&ok8&&ok9&&ok10&&ok11&&ok12&&ok13&&ok14&&ok15&&ok16&&ok17&&ok18&&ok19&&ok20&&ok21&&ok22&&ok23&&ok24&&ok25&&ok26&&ok27&&ok28&&ok29&&ok30&&ok31&&ok32&&ok33&&ok34&&ok35&&ok36&&ok37&&ok38&&ok39&&ok40&&ok41&&ok42&&ok43&&ok44&&ok45&&ok46&&ok47&&ok48&&ok49&&ok50&&ok51&&ok52&&ok53&&ok54&&ok55&&ok56&&ok57&&ok58&&ok59&&ok60&&ok61&&ok62&&ok63&&ok64&&ok65&&ok66&&ok67&&ok68&&ok69&&ok70&&ok71&&ok72;
+  const ok=ok1&&ok2&&ok3&&ok4&&ok5&&ok6&&ok7&&ok8&&ok9&&ok10&&ok11&&ok12&&ok13&&ok14&&ok15&&ok16&&ok17&&ok18&&ok19&&ok20&&ok21&&ok22&&ok23&&ok24&&ok25&&ok26&&ok27&&ok28&&ok29&&ok30&&ok31&&ok32&&ok33&&ok34&&ok35&&ok36&&ok37&&ok38&&ok39&&ok40&&ok41&&ok42&&ok43&&ok44&&ok45&&ok46&&ok47&&ok48&&ok49&&ok50&&ok51&&ok52&&ok53&&ok54&&ok55&&ok56&&ok57&&ok58&&ok59&&ok60&&ok61&&ok62&&ok63&&ok64&&ok65&&ok66&&ok67&&ok68&&ok69&&ok70&&ok71&&ok72&&ok73&&ok74&&ok75&&ok76&&ok77&&ok78&&ok79&&ok80&&ok81&&ok82&&ok83;
   const el=$("selftest");
-  el.textContent=ok?"内部抽出テスト：OK（v52・領収額合計最優先＋既知2形式回帰検証）":"内部抽出テスト：要修正（v52）";
+  el.textContent=ok?"内部抽出テスト：OK（v55・領収額合計＋合計請求額・既知3形式回帰検証）":"内部抽出テスト：要修正（v55）";
   if(!ok)el.style.background="#ffecec";
   return ok;
 }
