@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#f5f5f7">
-<title>のぶ帳簿 v41 会計欄中央対応版</title>
+<title>のぶ帳簿 v42 点数誤認識防止版</title>
 <style>
 :root{font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif;color:#111;background:#f5f5f7}
 *{box-sizing:border-box}
@@ -90,7 +90,7 @@ footer{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(
 </style>
 </head>
 <body>
-<header><h1>のぶ帳簿 <span class="ver">v41・会計欄中央対応版</span></h1></header>
+<header><h1>のぶ帳簿 <span class="ver">v42・点数誤認識防止版</span></h1></header>
 
 <div class="card">
   <span id="selftest" class="badge">内部テスト中…</span><span class="badge" style="margin-left:6px">PaddleOCR不使用</span><span class="badge" style="margin-left:6px">店名学習ON</span>
@@ -907,11 +907,15 @@ function extractMedicalPointValues(text){
         if(n>0)values.add(n);
       }
 
-      // OCR may split label and its number across adjacent lines.
-      for(let j=Math.max(0,i-1);j<=Math.min(lines.length-1,i+1);j++){
-        if(j===i)continue;
-        for(const n of amountsInLine(lines[j])){
-          if(n>0 && n<100000)values.add(n);
+      // OCR may split a point label and its value, but only forward.
+      // Never mark the previous line as points: it may be the actual 領収金額.
+      const j=i+1;
+      if(j<lines.length && !/円/.test(lines[j])){
+        const next=lines[j];
+        if(/^\s*[0-9,]+(?:\s*点)?\s*$/.test(next)){
+          for(const n of amountsInLine(next)){
+            if(n>0 && n<100000)values.add(n);
+          }
         }
       }
     }
@@ -953,17 +957,21 @@ function medicalAmountFromLabels(text){
         });
       }
 
-      for(let j=i+1;j<=Math.min(i+2,lines.length-1);j++){
+      // Safety-first: a split-line amount is accepted only on the immediately
+      // following line and only when that line explicitly contains 円.
+      const j=i+1;
+      if(j<lines.length){
         const target=lines[j];
-        if(forbidden.test(target))continue;
-        for(const n of amountsInLine(target)){
-          if(n<10||pointValues.has(n))continue;
-          candidates.push({
-            n,
-            score:label.score-(j-i)*120,
-            line:target,
-            source:label.source+"-nearby"
-          });
+        if(!forbidden.test(target) && /円/.test(target)){
+          for(const n of amountsInLine(target)){
+            if(n<10||pointValues.has(n))continue;
+            candidates.push({
+              n,
+              score:label.score-120,
+              line:target,
+              source:label.source+"-next-line-yen"
+            });
+          }
         }
       }
     }
@@ -1568,27 +1576,17 @@ async function precisionMedicalAccountingZone(file){
       const pointValues=extractMedicalPointValues(raw);
       const labeled=medicalAmountFromLabels(raw);
 
-      // Digit-only pass gives more reliable numerals in form/table cells.
+      // v42 safety rule: repeated digits alone are never treated as medical money.
+      // Point values often repeat in diagnosis/detail rows. Digits are diagnostic only.
       const digitRaw=await recognizeDigits(part);
-      const nums=numbersOnly(digitRaw).filter(n=>!pointValues.has(n));
-      const repeated=pickMedicalAccountingValue(nums);
 
       let cand=null;
-
-      if(labeled && labeled.score>=1800){
+      if(labeled && labeled.score>=1800 && !pointValues.has(labeled.n)){
         cand={
           amount:labeled.n,
           score:2200,
-          source:"accounting-explicit-label",
-          text:raw+"\n--- digits ---\n"+digitRaw,
-          angle
-        };
-      }else if(repeated){
-        cand={
-          amount:repeated.n,
-          score:1500+repeated.score,
-          source:"accounting-upper-repeat",
-          text:raw+"\n--- digits ---\n"+digitRaw,
+          source:"accounting-explicit-label-only",
+          text:raw+"\n--- digits (diagnostic only) ---\n"+digitRaw,
           angle
         };
       }
@@ -2537,8 +2535,12 @@ $("ocrBtn").onclick=async()=>{
       }
 
       if(genericMed.amount || precise){
-        const resolvedAmount=genericMed.amount || precise.n;
+        let resolvedAmount=genericMed.amount || precise.n;
         const resolvedAngle=genericMed.amount ? genericMed.angle : precise.angle;
+
+        // Final safety gate: a value recognized anywhere as medical points cannot be yen.
+        const allPointValues=extractMedicalPointValues(combined+"\n"+(genericMed.text||""));
+        if(allPointValues.has(Number(resolvedAmount))) resolvedAmount="";
 
         const header=genericMed.name
           ? {name:genericMed.name,text:""}
@@ -2552,6 +2554,8 @@ $("ocrBtn").onclick=async()=>{
         if(genericMed.date) $("m-date").value=genericMed.date;
         $("m-amount").value=resolvedAmount;
         applyLearnedMedical(combined);
+        // Learning may suggest old values, but never override a detected point value.
+        if(allPointValues.has(Number($("m-amount").value||0))) $("m-amount").value="";
 
         // Date gets its own precision pass if the full OCR missed it.
         if(!$("m-date").value){
@@ -2564,7 +2568,11 @@ $("ocrBtn").onclick=async()=>{
         }
 
         const n=$("m-name").value,d=$("m-date").value,a=$("m-amount").value;
-        setStatus(`精密OCR完了。名称「${n||"要確認"}」 / 日付 ${d||"要確認"} / 負担額 ${a}円\n同じ金額を複数回確認して採用しました。保存前に確認してください。`,"ok");
+        if(a){
+          setStatus(`精密OCR完了。名称「${n||"要確認"}」 / 日付 ${d||"要確認"} / 支払額 ${a}円\n金額ラベルと結び付いた値だけを採用しました。保存前に確認してください。`,"ok");
+        }else{
+          setStatus(`OCR完了。名称「${n||"要確認"}」 / 日付 ${d||"要確認"} / 支払額 要確認\n点数と判定された数値は金額欄へ入れていません。確実な領収金額を読めない場合は空欄にします。`,"err");
+        }
       }else{
         applyParsed(combined);
         // Never trust a tiny OCR fragment as a medical copay.
@@ -2946,12 +2954,19 @@ TEL 025-000-0000
   const ok47=medicalAmountFromLabels(invoiceCase).n===920;
   const ok48=medicalAmountFromLabels(invoiceCase).source.startsWith("invoice-receipt");
   const ok49=parseName(invoiceCase)==="奈良心療クリニック";
+  const splitPointOnly=`請求書兼領収証
+領収金額
+診療明細
+精神科専門療法 315点`;
+  const ok50=medicalAmountFromLabels(splitPointOnly)===null;
+  const sameLinePoint=`領収金額 315点`;
+  const ok51=medicalAmountFromLabels(sameLinePoint)===null;
 
   currentTab=oldTab;
 
-  const ok=ok1&&ok2&&ok3&&ok4&&ok5&&ok6&&ok7&&ok8&&ok9&&ok10&&ok11&&ok12&&ok13&&ok14&&ok15&&ok16&&ok17&&ok18&&ok19&&ok20&&ok21&&ok22&&ok23&&ok24&&ok25&&ok26&&ok27&&ok28&&ok29&&ok30&&ok31&&ok32&&ok33&&ok34&&ok35&&ok36&&ok37&&ok38&&ok39&&ok40&&ok41&&ok42&&ok43&&ok44&&ok45&&ok46&&ok47&&ok48&&ok49;
+  const ok=ok1&&ok2&&ok3&&ok4&&ok5&&ok6&&ok7&&ok8&&ok9&&ok10&&ok11&&ok12&&ok13&&ok14&&ok15&&ok16&&ok17&&ok18&&ok19&&ok20&&ok21&&ok22&&ok23&&ok24&&ok25&&ok26&&ok27&&ok28&&ok29&&ok30&&ok31&&ok32&&ok33&&ok34&&ok35&&ok36&&ok37&&ok38&&ok39&&ok40&&ok41&&ok42&&ok43&&ok44&&ok45&&ok46&&ok47&&ok48&&ok49&&ok50&&ok51;
   const el=$("selftest");
-  el.textContent=ok?"内部抽出テスト：OK（実座標トリミング＋中央会計欄）":"内部抽出テスト：要修正";
+  el.textContent=ok?"内部抽出テスト：OK（点数→円の誤認識防止）":"内部抽出テスト：要修正";
   if(!ok)el.style.background="#ffecec";
   return ok;
 }
