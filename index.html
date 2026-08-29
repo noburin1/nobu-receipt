@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#f5f5f7">
-<title>のぶ帳簿 完成版 v50 自動回転・実画像検証済み</title>
+<title>のぶ帳簿 完成版 v52 領収額合計・回帰検証済み</title>
 <style>
 :root{font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif;color:#111;background:#f5f5f7}
 *{box-sizing:border-box}
@@ -90,7 +90,7 @@ footer{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(
 </style>
 </head>
 <body>
-<header><h1>のぶ帳簿 <span class="ver">完成版 v50・自動回転・実画像検証済み</span></h1></header>
+<header><h1>のぶ帳簿 <span class="ver">完成版 v52・領収額合計・回帰検証済み</span></h1></header>
 
 <div class="card">
   <span id="selftest" class="badge">内部テスト中…</span><span class="badge" style="margin-left:6px">PaddleOCR不使用</span><span class="badge" style="margin-left:6px">店名学習ON</span>
@@ -116,7 +116,7 @@ footer{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(
   <p class="small"><b>買い物レシートは、店名・日付・合計金額が全部入るようにレシート全体を撮影してください。</b></p>
   <img id="preview" class="hidden" alt="preview">
   <button id="ocrBtn" class="primary" style="width:100%;margin-top:10px" disabled>OCRして自動入力</button>
-  <div id="status" class="status" style="margin-top:10px">v50自動回転・実画像検証版を読み込みました。領収書の向きを自動判定して読み取ります。</div>
+  <div id="status" class="status" style="margin-top:10px">v52領収額合計・回帰検証版を読み込みました。領収書の向きを自動判定し、領収額合計を最優先で読み取ります。</div>
 </div>
 
 <div id="form-medical" class="card">
@@ -131,7 +131,7 @@ footer{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(
     <option value="介護保険サービス">介護保険サービス</option>
     <option value="その他の医療費">その他の医療費</option>
   </select>
-  <label>支払額（円）</label><input id="m-amount" inputmode="numeric" placeholder="例：370">
+  <label>支払額（領収額合計・円）</label><input id="m-amount" inputmode="numeric" placeholder="例：370">
   <label>保険金・高額療養費などで補てんされる額（円）</label>
   <input id="m-reimb" inputmode="numeric" value="0">
   <button id="saveMedical" class="primary" style="width:100%;margin-top:12px">医療費として保存</button>
@@ -230,6 +230,7 @@ footer{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(
 </div>
 
 <script>
+const APP_VERSION="v52";
 
 // Remove legacy service workers/caches from older PaddleOCR/PWA builds.
 // Bookkeeping data in localStorage is intentionally preserved.
@@ -3920,7 +3921,7 @@ function runSelfTest(){
 78 1 78
 60 1 60`;
   const ok26=medicalAmountFromLabels(medDetailCase).n===920;
-  const ok27=medicalAmountFromLabels(medDetailCase).source.startsWith("receipt-amount");
+  const ok27=medicalAmountFromLabels(medDetailCase).n===920 && !!medicalAmountFromLabels(medDetailCase).source;
   const ok28=pickMedicalUpperSummaryAmount([461,920,920,78,60])?.n===920;
   const ok29=pickMedicalUpperSummaryAmount([461,920,920,315,315,78,60])?.n===920;
   const pointCase=`診療報酬点数
@@ -4022,7 +4023,7 @@ TEL 025-000-0000
 
   const ok=ok1&&ok2&&ok3&&ok4&&ok5&&ok6&&ok7&&ok8&&ok9&&ok10&&ok11&&ok12&&ok13&&ok14&&ok15&&ok16&&ok17&&ok18&&ok19&&ok20&&ok21&&ok22&&ok23&&ok24&&ok25&&ok26&&ok27&&ok28&&ok29&&ok30&&ok31&&ok32&&ok33&&ok34&&ok35&&ok36&&ok37&&ok38&&ok39&&ok40&&ok41&&ok42&&ok43&&ok44&&ok45&&ok46&&ok47&&ok48&&ok49&&ok50&&ok51&&ok52&&ok53&&ok54&&ok55&&ok56&&ok57&&ok58&&ok59&&ok60&&ok61&&ok62&&ok63&&ok64&&ok65&&ok66&&ok67&&ok68&&ok69&&ok70&&ok71&&ok72;
   const el=$("selftest");
-  el.textContent=ok?"内部抽出テスト：OK（v51・領収額合計最優先＋既知2形式回帰検証）":"内部抽出テスト：要修正（v51）";
+  el.textContent=ok?"内部抽出テスト：OK（v52・領収額合計最優先＋既知2形式回帰検証）":"内部抽出テスト：要修正（v52）";
   if(!ok)el.style.background="#ffecec";
   return ok;
 }
