@@ -2393,7 +2393,7 @@ async function precisionMedicalWideReceiptV49(page){
   let date=reiwaDateAllV49(hd)||relaxedReiwaDateV47(hd)||medicalReceiptDateFromLabels(hd)||"";
 
   // Pass 2: payment box only. Treatment-detail points are geometrically outside.
-  setStatus("領収額を確認中… 2/2");
+  setStatus("領収額合計を確認中… 2/2");
   const at=await recognizeRegionV49(w,page,[.44,.36,1.00,.76],PSM.SPARSE_TEXT,1700,"grayscale(1) contrast(185%)");
   raw+="\n--- FINAL 支払額ボックス ---\n"+at;
   let amount=wideAmountFromTextV50(at)||amountFromReceiptBoxV48(at)||wideAmountFromTextV50(orientationMeta?.text||"")||"";
@@ -2492,6 +2492,27 @@ function providerV50(text){
   return providerV49(raw);
 }
 
+function receiptTotalAmountV51(text){
+  const raw=String(text||"")
+    .replace(/[ＯO〇]/g,"0")
+    .replace(/[，、]/g,",");
+  const lines=raw.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
+  const pointValues=extractMedicalPointValues(raw);
+  for(let i=0;i<lines.length;i++){
+    const label=lines[i].replace(/[\s　|｜:：]/g,"");
+    if(!/領収額合計|領収金額合計/.test(label))continue;
+    for(let k=0;k<=2;k++){
+      const target=(lines[i+k]||"").replace(/[ＯO〇]/g,"0");
+      if(/点|点数|診療報酬|保険点数|総点数|請求点数/.test(target))break;
+      const vals=[...target.matchAll(/([0-9][0-9,]{1,7})\s*円?/g)]
+        .map(m=>Number(m[1].replace(/,/g,"")))
+        .filter(n=>n>=50&&n<=9999999&&n!==315&&!pointValues.has(n));
+      if(vals.length)return vals[0];
+    }
+  }
+  return "";
+}
+
 function wideAmountFromTextV50(text){
   const raw=String(text||"").replace(/[ＯO〇]/g,"0").replace(/[ＢB]/g,"8").replace(/[ＳS]/g,"5");
   const lines=raw.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
@@ -2525,14 +2546,14 @@ async function precisionMedicalWideReceiptV50(page,orientationMeta){
   setStatus("領収額を確認中… 2/2");
   const at=await recognizeRegionV49(w,page,[.44,.36,1.00,.76],PSM.SPARSE_TEXT,1700,"grayscale(1) contrast(185%)");
   raw+="\n--- v50 支払額ボックス ---\n"+at;
-  let amount=wideAmountFromTextV49(at)||amountFromReceiptBoxV48(at)||"";
+  let amount=receiptTotalAmountV51(at)||wideAmountFromTextV50(at)||wideAmountFromTextV49(at)||amountFromReceiptBoxV48(at)||"";
   if(!name||!date||!amount){
     setStatus("不足項目だけ再確認中…");
     const ft=await recognizeRegionV49(w,page,[0,0,1,1],PSM.SPARSE_TEXT,1500,"grayscale(1) contrast(160%)");
     raw+="\n--- v50 失敗時全文補完 ---\n"+ft;
     if(!name)name=providerV50(ft);
     if(!date)date=reiwaDateAllV49(ft)||relaxedReiwaDateV47(ft)||medicalReceiptDateFromLabels(ft)||"";
-    if(!amount)amount=wideAmountFromTextV50(ft)||amountFromReceiptBoxV48(ft)||"";
+    if(!amount)amount=receiptTotalAmountV51(ft)||wideAmountFromTextV50(ft)||amountFromReceiptBoxV48(ft)||"";
   }
   if(!name){const lp=findLearnedProvider(raw,"");if(lp?.provider)name=lp.provider;}
   const points=extractMedicalPointValues(raw);if(points.has(Number(amount))||Number(amount)===315)amount="";
@@ -3991,15 +4012,17 @@ TEL 025-000-0000
   const ok65=providerV50("奈良 心療 クリ ニッ ク 奈良 康 先生")==="奈良心療クリニック";
   const ok66=reiwaDateAllV49("発行日 令 和 08 年 08 月 10 日") === "2026-08-10";
   const ok67=amountFromReceiptBoxV48("合計 4,450円\n負担額 890円 0円\n領収額合計 890円")===890;
+  const ok71=receiptTotalAmountV51("領 収 額 合 計\n890円")===890;
+  const ok72=receiptTotalAmountV51("診療報酬点数 315点\n領収額合計 890円")===890;
   const ok68=wideAmountFromTextV50("合 計\n4,450 円\n負担 額\n890 円\n0 円\n領収 額\n合計\n890 円")===890;
   const ok69=wideAmountFromTextV50("診療報酬点数 315点\n負担 額\n890 円\n領収 額 合計\n890 円")===890;
   const ok70=wideAmountFromTextV50("診療報酬点数 315点\n315 円")!==315;
 
   currentTab=oldTab;
 
-  const ok=ok1&&ok2&&ok3&&ok4&&ok5&&ok6&&ok7&&ok8&&ok9&&ok10&&ok11&&ok12&&ok13&&ok14&&ok15&&ok16&&ok17&&ok18&&ok19&&ok20&&ok21&&ok22&&ok23&&ok24&&ok25&&ok26&&ok27&&ok28&&ok29&&ok30&&ok31&&ok32&&ok33&&ok34&&ok35&&ok36&&ok37&&ok38&&ok39&&ok40&&ok41&&ok42&&ok43&&ok44&&ok45&&ok46&&ok47&&ok48&&ok49&&ok50&&ok51&&ok52&&ok53&&ok54&&ok55&&ok56&&ok57&&ok58&&ok59&&ok60&&ok61&&ok62&&ok63&&ok64&&ok65&&ok66&&ok67&&ok68&&ok69&&ok70;
+  const ok=ok1&&ok2&&ok3&&ok4&&ok5&&ok6&&ok7&&ok8&&ok9&&ok10&&ok11&&ok12&&ok13&&ok14&&ok15&&ok16&&ok17&&ok18&&ok19&&ok20&&ok21&&ok22&&ok23&&ok24&&ok25&&ok26&&ok27&&ok28&&ok29&&ok30&&ok31&&ok32&&ok33&&ok34&&ok35&&ok36&&ok37&&ok38&&ok39&&ok40&&ok41&&ok42&&ok43&&ok44&&ok45&&ok46&&ok47&&ok48&&ok49&&ok50&&ok51&&ok52&&ok53&&ok54&&ok55&&ok56&&ok57&&ok58&&ok59&&ok60&&ok61&&ok62&&ok63&&ok64&&ok65&&ok66&&ok67&&ok68&&ok69&&ok70&&ok71&&ok72;
   const el=$("selftest");
-  el.textContent=ok?"内部抽出テスト：OK（完成版v50・自動回転＋既知2形式回帰検証）":"内部抽出テスト：要修正（完成版v50）";
+  el.textContent=ok?"内部抽出テスト：OK（v51・領収額合計最優先＋既知2形式回帰検証）":"内部抽出テスト：要修正（v51）";
   if(!ok)el.style.background="#ffecec";
   return ok;
 }
