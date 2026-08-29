@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#f5f5f7">
-<title>のぶ帳簿 完成版 v53 支払先名精密補正・領収額合計</title>
+<title>のぶ帳簿 完成版 v54 支払先名補正・保存回帰検証済み</title>
 <style>
 :root{font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif;color:#111;background:#f5f5f7}
 *{box-sizing:border-box}
@@ -90,7 +90,7 @@ footer{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(
 </style>
 </head>
 <body>
-<header><h1>のぶ帳簿 <span class="ver">完成版 v53・支払先名精密補正・領収額合計</span></h1></header>
+<header><h1>のぶ帳簿 <span class="ver">完成版 v54・支払先名補正・保存回帰検証済み</span></h1></header>
 
 <div class="card">
   <span id="selftest" class="badge">内部テスト中…</span><span class="badge" style="margin-left:6px">PaddleOCR不使用</span><span class="badge" style="margin-left:6px">店名学習ON</span>
@@ -116,7 +116,7 @@ footer{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(
   <p class="small"><b>買い物レシートは、店名・日付・合計金額が全部入るようにレシート全体を撮影してください。</b></p>
   <img id="preview" class="hidden" alt="preview">
   <button id="ocrBtn" class="primary" style="width:100%;margin-top:10px" disabled>OCRして自動入力</button>
-  <div id="status" class="status" style="margin-top:10px">v53支払先名精密補正版を読み込みました。領収額合計を最優先にし、会計・税ラベルを支払先名から除外します。</div>
+  <div id="status" class="status" style="margin-top:10px">v54支払先名補正・保存回帰検証版を読み込みました。領収額合計を最優先にし、会計ラベルを支払先名から除外します。</div>
 </div>
 
 <div id="form-medical" class="card">
@@ -2484,29 +2484,21 @@ async function orientMedicalPageV50(page){
   await restoreTextOCR();
   return {canvas:rotateCanvasV50(page,best.deg),angle:best.deg,score:best.score,text:best.text};
 }
-function sanitizeProviderNameV53(name){
+function sanitizeProviderNameV54(name){
   let s=String(name||"")
     .replace(/[|｜]/g,"")
     .replace(/[　\s]+/g," ")
     .trim();
 
-  // Accounting/tax labels are often glued to a pharmacy/clinic name by OCR.
-  // Strip them only when they appear as a leading label; never remove text
-  // from inside a legitimate provider name.
+  // OCR may concatenate accounting/tax headings immediately before a provider name.
   const leadingNoise=/^(?:(?:外税額|内税額|外税|内税|課税額|非課税額|消費税額|消費税|税額|領収額合計|領収金額合計|領収金額|領収額|支払額|お支払額|請求額|請求金額|今回請求額|今回収受額|負担額|患者負担額|自己負担額|窓口負担額|合計金額|合計)[\s:：・\-]*)+/;
-  let prev;
-  do{
-    prev=s;
-    s=s.replace(leadingNoise,"").trim();
-  }while(s!==prev);
-
-  // Common OCR fragments before provider names.
+  let prev="";
+  while(prev!==s){ prev=s; s=s.replace(leadingNoise,"").trim(); }
   s=s.replace(/^(?:金額|円|額)[\s:：・\-]+/,"").trim();
 
-  // Preserve known canonical spelling.
   const compact=s.replace(/\s/g,"");
-  if(/しなの薬局/.test(compact))return "しなの薬局";
-  if(/奈良心療クリニック/.test(compact))return sanitizeProviderNameV53("奈良心療クリニック");
+  if(compact.includes("しなの薬局")) return "しなの薬局";
+  if(compact.includes("奈良心療クリニック")) return "奈良心療クリニック";
   return s;
 }
 
@@ -2515,8 +2507,8 @@ function providerV50(text){
   const compact=raw.replace(/[\s|｜]/g,"").replace(/ク[リソ]ニッ?ク/g,"クリニック");
   if(/奈良心療クリニック/.test(compact))return "奈良心療クリニック";
   const m=compact.match(/([一-龯ぁ-んァ-ヶー]{2,}(?:クリニック|病院|医院|診療所|歯科|薬局|調剤薬局))/);
-  if(m)return sanitizeProviderNameV53(cleanProviderNameV45(m[1],raw));
-  return sanitizeProviderNameV53(providerV49(raw));
+  if(m)return sanitizeProviderNameV54(cleanProviderNameV45(m[1],raw));
+  return sanitizeProviderNameV54(providerV49(raw));
 }
 
 function receiptTotalAmountV51(text){
@@ -3602,11 +3594,11 @@ $("ocrBtn").onclick=async()=>{
 
         applyParsed(combined);
 
-        if(header.name) $("m-name").value=sanitizeProviderNameV53(header.name);
+        if(header.name) $("m-name").value=header.name;
         if(genericMed.date) $("m-date").value=genericMed.date;
         $("m-amount").value=resolvedAmount;
         applyLearnedMedical(combined);
-        $("m-name").value=sanitizeProviderNameV53($("m-name").value);
+        $("m-name").value=sanitizeProviderNameV54($("m-name").value);
         // Learning may suggest old values, but never override a detected point value.
         if(allPointValues.has(Number($("m-amount").value||0))) $("m-amount").value="";
 
@@ -3693,8 +3685,7 @@ function add(type,obj){
 }
 $("saveMedical").onclick=()=>{
   const patient=$("m-patient").value.trim()||"本人";
-  const name=sanitizeProviderNameV53($("m-name").value.trim());
-  $("m-name").value=name;
+  const name=$("m-name").value.trim();
   const date=$("m-date").value;
   const category=$("m-category").value;
   const amount=Number($("m-amount").value||0);
