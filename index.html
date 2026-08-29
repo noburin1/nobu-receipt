@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#f5f5f7">
-<title>のぶ帳簿 v43 高速・医療OCR改良版</title>
+<title>のぶ帳簿 v44 会計帯高速認識版</title>
 <style>
 :root{font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif;color:#111;background:#f5f5f7}
 *{box-sizing:border-box}
@@ -90,7 +90,7 @@ footer{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(
 </style>
 </head>
 <body>
-<header><h1>のぶ帳簿 <span class="ver">v43・高速医療OCR改良版</span></h1></header>
+<header><h1>のぶ帳簿 <span class="ver">v44・会計帯高速認識版</span></h1></header>
 
 <div class="card">
   <span id="selftest" class="badge">内部テスト中…</span><span class="badge" style="margin-left:6px">PaddleOCR不使用</span><span class="badge" style="margin-left:6px">店名学習ON</span>
@@ -1386,6 +1386,18 @@ async function makeMedicalHiResCanvas(file){
   return c;
 }
 
+async function makeColorCanvas(file){
+  const img=await loadImage(file);
+  const maxSide=1600;
+  const scale=Math.min(1,maxSide/Math.max(img.naturalWidth,img.naturalHeight));
+  const w=Math.max(1,Math.round(img.naturalWidth*scale));
+  const h=Math.max(1,Math.round(img.naturalHeight*scale));
+  const c=document.createElement("canvas");
+  c.width=w;c.height=h;
+  c.getContext("2d",{willReadFrequently:true}).drawImage(img,0,0,w,h);
+  return c;
+}
+
 async function precisionMedicalInvoiceHeader(file){
   const angles=[0,90,-90];
   const zones=[
@@ -1682,43 +1694,72 @@ function reiwaStampDateFromText(raw){
 }
 
 async function precisionMedicalDocument(file){
-  // v43 FAST path: one broad upper-document OCR + at most two focused fallbacks.
-  // Camera guide keeps the receipt upright, so 90/-90 multi-pass OCR is removed.
+  // v44: template-aware FAST path.
+  // The target medical receipt places the actual payment row around 36–49% of
+  // the receipt height. Restricting OCR to this accounting band prevents 315
+  // point values in the upper/lower treatment tables from becoming money.
   await restoreTextOCR();
   const w=await ensureWorker();
-  const base=await makeMedicalHiResCanvas(file);
-  const upper=cropCanvas(base,0.00,0.00,1.00,0.72,1.15);
+  const base=await makeCanvas(file,"full",0);
 
-  setStatus("医療領収書を高速OCR中… 1/3");
+  let raw="";
+  let name="";
+  let date="";
+  let amt=null;
+
+  // PASS 1: narrow accounting band. Digits only, then require a duplicate
+  // value inside this band. On this form the paid amount is printed twice.
+  // This is safe because detail-point rows are outside this band.
+  setStatus("会計欄を高速確認中… 1/2");
+  const band=cropCanvas(base,0.00,0.36,1.00,0.49,2.25);
+  const digitRaw=await recognizeDigits(band);
+  raw += "--- 会計帯 数字 ---\n"+digitRaw;
+
+  const nums=numbersOnly(digitRaw).filter(n=>n>=50 && n<=9999999);
+  const counts=new Map();
+  for(const n of nums)counts.set(n,(counts.get(n)||0)+1);
+  const repeated=[...counts.entries()]
+    .filter(([,c])=>c>=2)
+    .map(([n,c])=>({n,c,score:c*1000+(n>=100?100:0)}))
+    .sort((a,b)=>b.score-a.score || b.n-a.n);
+  if(repeated.length){
+    amt={n:repeated[0].n,score:3200,source:"v44-accounting-band-repeat"};
+  }
+
+  // PASS 2: one text OCR of the upper half for provider + explicit labels.
+  // Also use a tight red-stamp crop for the date in the same pass budget.
+  setStatus("名称・領収日を確認中… 2/2");
+  await restoreTextOCR();
   await w.setParameters({
     tessedit_char_whitelist:"",
     tessedit_pageseg_mode:Tesseract.PSM.SPARSE_TEXT,
     preserve_interword_spaces:"1"
   });
+  const upper=cropCanvas(base,0.00,0.00,1.00,0.54,1.25);
   let r=await w.recognize(upper,{rotateAuto:false});
-  let raw=r.data.text||"";
+  const upperText=r.data.text||"";
+  raw += "\n--- 上半分 ---\n"+upperText;
+  name=parseName(upperText)||"";
+  date=medicalReceiptDateFromLabels(upperText)||medicalDateFromDocument(upperText)||"";
 
-  let name=parseName(raw);
-  let date=medicalReceiptDateFromLabels(raw)||medicalDateFromDocument(raw)||"";
-  let amt=medicalAmountFromLabels(raw);
-
-  // One focused accounting pass only when the broad pass did not find a safe amount.
+  // If the accounting-band duplicate was not available, only accept an
+  // explicit payment label from the upper half. Never fall back to arbitrary
+  // repeated numbers from the whole receipt.
   if(!amt){
-    setStatus("領収金額を確認中… 2/3");
-    const account=cropCanvas(base,0.00,0.16,1.00,0.62,1.55);
-    r=await w.recognize(account,{rotateAuto:false});
-    const atext=r.data.text||"";
-    raw += "\n--- 会計欄 ---\n"+atext;
-    amt=medicalAmountFromLabels(atext)||medicalAmountFromLabels(raw);
-    if(!name)name=parseName(atext)||name;
-    if(!date)date=medicalReceiptDateFromLabels(atext)||medicalDateFromDocument(atext)||"";
+    const labeled=medicalAmountFromLabels(upperText);
+    if(labeled && labeled.score>=1800){
+      amt=labeled;
+    }
   }
 
-  // Red receipt stamp is often faint in grayscale. Isolate red only if date is still missing.
+  // Tight red stamp region: on this common form the stamp is at right-middle.
+  // Run this only when the upper text pass did not resolve the date.
   if(!date){
-    setStatus("領収印の日付を確認中… 3/3");
-    const stampArea=cropCanvas(base,0.00,0.00,1.00,0.58,1.5);
-    const red=await makeRedDateCanvas(stampArea);
+    // IMPORTANT: use the original COLOR image here. makeCanvas() is grayscale,
+    // so red-stamp isolation cannot work on it.
+    const colorBase=await makeColorCanvas(file);
+    const stamp=cropCanvas(colorBase,0.60,0.27,1.00,0.49,2.1);
+    const red=await makeRedDateCanvas(stamp);
     await w.setParameters({
       tessedit_char_whitelist:"0123456789./-年月日令和",
       tessedit_pageseg_mode:Tesseract.PSM.SPARSE_TEXT,
@@ -3021,6 +3062,12 @@ TEL 025-000-0000
 315
 診療報酬点数`;
   const ok53=medicalAmountFromLabels(splitPoint)===null;
+
+  // v44 accounting-band selection: 920 duplicated, 315 outside the band is irrelevant.
+  const v44nums=[920,920,660];
+  const v44counts=new Map(); for(const n of v44nums)v44counts.set(n,(v44counts.get(n)||0)+1);
+  const v44pick=[...v44counts.entries()].filter(([,c])=>c>=2).sort((a,b)=>b[1]-a[1]||b[0]-a[0])[0]?.[0];
+  const ok54=v44pick===920;
 
   currentTab=oldTab;
 
