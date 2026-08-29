@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#f5f5f7">
-<title>のぶ帳簿 v45 実画像検証・高速認識版</title>
+<title>のぶ帳簿 v46 OCR起動修正版・高速認識版</title>
 <style>
 :root{font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif;color:#111;background:#f5f5f7}
 *{box-sizing:border-box}
@@ -90,7 +90,7 @@ footer{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(
 </style>
 </head>
 <body>
-<header><h1>のぶ帳簿 <span class="ver">v45・実画像検証・高速認識版</span></h1></header>
+<header><h1>のぶ帳簿 <span class="ver">v46・OCR起動修正版・高速認識版</span></h1></header>
 
 <div class="card">
   <span id="selftest" class="badge">内部テスト中…</span><span class="badge" style="margin-left:6px">PaddleOCR不使用</span><span class="badge" style="margin-left:6px">店名学習ON</span>
@@ -623,7 +623,12 @@ function learnStoreName(text,confirmedName){
   }
 }
 
-const TESS_URL="https://cdn.jsdelivr.net/npm/tesseract.js@7.0.0/dist/tesseract.min.js";
+const TESS_URLS=[
+  "https://cdn.jsdelivr.net/npm/tesseract.js@7.0.0/dist/tesseract.min.js",
+  "https://unpkg.com/tesseract.js@7.0.0/dist/tesseract.min.js"
+];
+// PSM値をTesseractグローバルから分離。ライブラリ読込前でも安全に参照できる。
+const PSM=Object.freeze({AUTO:"3",SINGLE_BLOCK:"6",SINGLE_LINE:"7",SPARSE_TEXT:"11"});
 let db=JSON.parse(localStorage.getItem(KEY)||"[]");
 let currentFile=null,currentTab="medical",worker=null,loadPromise=null;
 const $=id=>document.getElementById(id);
@@ -633,16 +638,26 @@ function setStatus(msg,kind=""){
   const el=$("status"); el.textContent=msg; el.className="status"+(kind?" "+kind:"");
 }
 function loadTesseract(){
-  if(window.Tesseract)return Promise.resolve();
+  if(window.Tesseract && typeof window.Tesseract.createWorker==="function") return Promise.resolve(window.Tesseract);
   if(loadPromise)return loadPromise;
-  loadPromise=new Promise((resolve,reject)=>{
+  loadPromise=(async()=>{
     setStatus("OCRライブラリを読み込み中…");
-    const s=document.createElement("script");
-    s.src=TESS_URL;s.async=true;
-    s.onload=()=>window.Tesseract?resolve():reject(new Error("OCRライブラリを読み込めませんでした"));
-    s.onerror=()=>reject(new Error("OCRライブラリの取得に失敗しました"));
-    document.head.appendChild(s);
-  });
+    let lastErr=null;
+    for(const url of TESS_URLS){
+      try{
+        await new Promise((resolve,reject)=>{
+          const s=document.createElement("script");
+          s.src=url; s.async=true; s.crossOrigin="anonymous";
+          s.onload=()=>resolve();
+          s.onerror=()=>reject(new Error("OCRライブラリの取得に失敗しました"));
+          document.head.appendChild(s);
+        });
+        if(window.Tesseract && typeof window.Tesseract.createWorker==="function") return window.Tesseract;
+        lastErr=new Error("OCRライブラリを読み込めませんでした");
+      }catch(e){lastErr=e;}
+    }
+    throw lastErr||new Error("OCRライブラリを読み込めませんでした");
+  })().catch(e=>{loadPromise=null;throw e;});
   return loadPromise;
 }
 function saveDB(){localStorage.setItem(KEY,JSON.stringify(db));render();}
@@ -1159,9 +1174,9 @@ function applyParsed(text){
 
 async function ensureWorker(){
   if(worker)return worker;
-  await loadTesseract();
   setStatus("日本語OCRエンジンを初期化中… 初回だけ時間がかかります。");
-  worker=await Tesseract.createWorker(["jpn","eng"],1,{
+  const tess=await loadTesseract();
+  worker=await tess.createWorker(["jpn","eng"],1,{
     logger:m=>{
       const p=Number.isFinite(m.progress)?` ${Math.round(m.progress*100)}%`:"";
       setStatus(`${m.status||"OCR準備中"}${p}`);
@@ -1169,7 +1184,7 @@ async function ensureWorker(){
   });
   try{
     await worker.setParameters({
-      tessedit_pageseg_mode:Tesseract.PSM.AUTO,
+      tessedit_pageseg_mode:PSM.AUTO,
       preserve_interword_spaces:"1"
     });
   }catch(_){}
@@ -1274,7 +1289,7 @@ async function recognizeDigits(source){
   const w=await ensureWorker();
   await w.setParameters({
     tessedit_char_whitelist:"0123456789",
-    tessedit_pageseg_mode:Tesseract.PSM.SINGLE_BLOCK,
+    tessedit_pageseg_mode:PSM.SINGLE_BLOCK,
     preserve_interword_spaces:"1"
   });
   const r=await w.recognize(source,{rotateAuto:false});
@@ -1285,7 +1300,7 @@ async function restoreTextOCR(){
   const w=await ensureWorker();
   await w.setParameters({
     tessedit_char_whitelist:"",
-    tessedit_pageseg_mode:Tesseract.PSM.AUTO,
+    tessedit_pageseg_mode:PSM.AUTO,
     preserve_interword_spaces:"1"
   });
 }
@@ -1333,7 +1348,7 @@ async function precisionMedicalUpperSummary(file){
       await restoreTextOCR();
       await w.setParameters({
         tessedit_char_whitelist:"",
-        tessedit_pageseg_mode:Tesseract.PSM.SPARSE_TEXT,
+        tessedit_pageseg_mode:PSM.SPARSE_TEXT,
         preserve_interword_spaces:"1"
       });
       const tr=await w.recognize(top,{rotateAuto:false});
@@ -1420,7 +1435,7 @@ async function precisionMedicalInvoiceHeader(file){
 
       await w.setParameters({
         tessedit_char_whitelist:"",
-        tessedit_pageseg_mode:Tesseract.PSM.SPARSE_TEXT,
+        tessedit_pageseg_mode:PSM.SPARSE_TEXT,
         preserve_interword_spaces:"1"
       });
 
@@ -1466,7 +1481,7 @@ async function precisionMedicalProvider(file){
 
       await w.setParameters({
         tessedit_char_whitelist:"",
-        tessedit_pageseg_mode:Tesseract.PSM.SPARSE_TEXT,
+        tessedit_pageseg_mode:PSM.SPARSE_TEXT,
         preserve_interword_spaces:"1"
       });
 
@@ -1509,7 +1524,7 @@ async function precisionMedicalReceiptDate(file){
 
       await w.setParameters({
         tessedit_char_whitelist:"",
-        tessedit_pageseg_mode:Tesseract.PSM.SPARSE_TEXT,
+        tessedit_pageseg_mode:PSM.SPARSE_TEXT,
         preserve_interword_spaces:"1"
       });
       const r=await w.recognize(part,{rotateAuto:false});
@@ -1587,7 +1602,7 @@ async function precisionMedicalAccountingZone(file){
       const w=await ensureWorker();
       await w.setParameters({
         tessedit_char_whitelist:"",
-        tessedit_pageseg_mode:Tesseract.PSM.SPARSE_TEXT,
+        tessedit_pageseg_mode:PSM.SPARSE_TEXT,
         preserve_interword_spaces:"1"
       });
       const tr=await w.recognize(part,{rotateAuto:false});
@@ -1645,7 +1660,7 @@ async function precisionMedicalReceiptAmount(file){
 
       await w.setParameters({
         tessedit_char_whitelist:"",
-        tessedit_pageseg_mode:Tesseract.PSM.SPARSE_TEXT,
+        tessedit_pageseg_mode:PSM.SPARSE_TEXT,
         preserve_interword_spaces:"1"
       });
       const r=await w.recognize(part,{rotateAuto:false});
@@ -1860,7 +1875,7 @@ async function readNaraAmountByStampV45(base,stamp){
     const x1=stamp.x+fx1*stamp.w,x2=stamp.x+fx2*stamp.w;
     const y1=stamp.y+fy1*stamp.h,y2=stamp.y+fy2*stamp.h;
     const c=cropPixels(base,x1,y1,x2-x1,y2-y1,480,"grayscale(1) contrast(180%)");
-    for(const mode of [Tesseract.PSM.SINGLE_BLOCK,Tesseract.PSM.SINGLE_LINE]){
+    for(const mode of [PSM.SINGLE_BLOCK,PSM.SINGLE_LINE]){
       const t=await ocrSmallDigitsV45(c,mode);raw.push(`ROI${ri+1}/${mode}: ${t}`);
       const vals=numbersOnly(t).filter(n=>n>=50&&n<=999999);
       if(vals.length===1){await restoreTextOCR();return {n:vals[0],text:raw.join("\n"),source:"v45-stamp-anchored-payment-cell"};}
@@ -1877,7 +1892,7 @@ async function readNaraDateByStampV45(base,stamp){
     stamp.w*1.15,stamp.h*.50,760,"grayscale(1) contrast(145%)");
   const variants=[dateCrop,redOnlyCanvas(dateCrop)];
   for(let vi=0;vi<variants.length;vi++){
-    for(const mode of [Tesseract.PSM.SINGLE_BLOCK,Tesseract.PSM.SPARSE_TEXT]){
+    for(const mode of [PSM.SINGLE_BLOCK,PSM.SPARSE_TEXT]){
       const t=await ocrSmallDigitsV45(variants[vi],mode);raw.push(`DATE${vi+1}/${mode}: ${t}`);
       const d=looseReiwaStampDate(t);if(d){await restoreTextOCR();return {date:d,text:raw.join("\n")};}
     }
@@ -1908,7 +1923,7 @@ async function precisionMedicalDocumentV45(file){
   setStatus("医療機関名を確認中… 3/3");
   await restoreTextOCR();
   const w=await ensureWorker();
-  await w.setParameters({tessedit_char_whitelist:"",tessedit_pageseg_mode:Tesseract.PSM.SPARSE_TEXT,preserve_interword_spaces:"1"});
+  await w.setParameters({tessedit_char_whitelist:"",tessedit_pageseg_mode:PSM.SPARSE_TEXT,preserve_interword_spaces:"1"});
   const top=cropPixels(base,0,0,base.width,base.height*.25,1500,"grayscale(1) contrast(150%)");
   const rr=await w.recognize(top,{rotateAuto:false});
   const topText=rr.data.text||"";raw+="\n--- 上部文字 ---\n"+topText;
@@ -1960,7 +1975,7 @@ async function precisionMedicalDocument(file){
   await restoreTextOCR();
   await w.setParameters({
     tessedit_char_whitelist:"",
-    tessedit_pageseg_mode:Tesseract.PSM.SPARSE_TEXT,
+    tessedit_pageseg_mode:PSM.SPARSE_TEXT,
     preserve_interword_spaces:"1"
   });
   const upper=cropCanvas(base,0.00,0.00,1.00,0.54,1.25);
@@ -1990,7 +2005,7 @@ async function precisionMedicalDocument(file){
     const red=await makeRedDateCanvas(stamp);
     await w.setParameters({
       tessedit_char_whitelist:"0123456789./-年月日令和",
-      tessedit_pageseg_mode:Tesseract.PSM.SPARSE_TEXT,
+      tessedit_pageseg_mode:PSM.SPARSE_TEXT,
       preserve_interword_spaces:"1"
     });
     r=await w.recognize(red,{rotateAuto:false});
@@ -2071,7 +2086,7 @@ async function precisionMedicalName(file,angle){
     const w=await ensureWorker();
     await w.setParameters({
       tessedit_char_whitelist:"",
-      tessedit_pageseg_mode:Tesseract.PSM.SPARSE_TEXT,
+      tessedit_pageseg_mode:PSM.SPARSE_TEXT,
       preserve_interword_spaces:"1"
     });
     const r=await w.recognize(header,{rotateAuto:false});
@@ -2094,7 +2109,7 @@ async function precisionMedicalDate(file){
     const red=await makeRedDateCanvas(area);
     await w.setParameters({
       tessedit_char_whitelist:"0123456789./-年月日令和",
-      tessedit_pageseg_mode:Tesseract.PSM.SPARSE_TEXT,
+      tessedit_pageseg_mode:PSM.SPARSE_TEXT,
       preserve_interword_spaces:"1"
     });
     const r=await w.recognize(red,{rotateAuto:false});
@@ -2559,7 +2574,7 @@ async function precisionShoppingAmount(file,baseText=""){
 
       await w.setParameters({
         tessedit_char_whitelist:"",
-        tessedit_pageseg_mode:zi===2 ? Tesseract.PSM.AUTO : Tesseract.PSM.SPARSE_TEXT,
+        tessedit_pageseg_mode:zi===2 ? PSM.AUTO : PSM.SPARSE_TEXT,
         preserve_interword_spaces:"1"
       });
 
@@ -2724,7 +2739,7 @@ async function precisionShoppingHeader(file){
     [0.00,0.00,1.00,0.55],
     [0.04,0.00,0.96,0.68]
   ];
-  const psms=[Tesseract.PSM.SPARSE_TEXT,Tesseract.PSM.AUTO];
+  const psms=[PSM.SPARSE_TEXT,PSM.AUTO];
   const texts=[];
   let likelyAngle=0;
   let foundCore=false;
@@ -2776,7 +2791,7 @@ async function precisionShoppingHeader(file){
     thresholdCanvas(logoBase,180,false)
   ];
 
-  const logoPsms=[Tesseract.PSM.SPARSE_TEXT,Tesseract.PSM.SINGLE_LINE];
+  const logoPsms=[PSM.SPARSE_TEXT,PSM.SINGLE_LINE];
 
   for(let vi=0;vi<logoVariants.length;vi++){
     for(let pi=0;pi<logoPsms.length;pi++){
@@ -3298,7 +3313,7 @@ TEL 025-000-0000
 
   const ok=ok1&&ok2&&ok3&&ok4&&ok5&&ok6&&ok7&&ok8&&ok9&&ok10&&ok11&&ok12&&ok13&&ok14&&ok15&&ok16&&ok17&&ok18&&ok19&&ok20&&ok21&&ok22&&ok23&&ok24&&ok25&&ok26&&ok27&&ok28&&ok29&&ok30&&ok31&&ok32&&ok33&&ok34&&ok35&&ok36&&ok37&&ok38&&ok39&&ok40&&ok41&&ok42&&ok43&&ok44&&ok45&&ok46&&ok47&&ok48&&ok49&&ok50&&ok51&&ok52&&ok53&&ok54&&ok55&&ok56&&ok57&&ok58&&ok59;
   const el=$("selftest");
-  el.textContent=ok?"内部抽出テスト：OK（v45・実画像用ロジック）":"内部抽出テスト：要修正";
+  el.textContent=ok?"内部抽出テスト：OK（v46・OCR起動安全化）":"内部抽出テスト：要修正";
   if(!ok)el.style.background="#ffecec";
   return ok;
 }
