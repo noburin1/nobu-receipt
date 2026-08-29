@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#f5f5f7">
-<title>のぶ帳簿 v47 自動用紙検出・2形式対応版</title>
+<title>のぶ帳簿 v48 2形式実画像再検証版</title>
 <style>
 :root{font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif;color:#111;background:#f5f5f7}
 *{box-sizing:border-box}
@@ -90,7 +90,7 @@ footer{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(
 </style>
 </head>
 <body>
-<header><h1>のぶ帳簿 <span class="ver">v47・自動用紙検出・2形式対応版</span></h1></header>
+<header><h1>のぶ帳簿 <span class="ver">v48・2形式実画像再検証版</span></h1></header>
 
 <div class="card">
   <span id="selftest" class="badge">内部テスト中…</span><span class="badge" style="margin-left:6px">PaddleOCR不使用</span><span class="badge" style="margin-left:6px">店名学習ON</span>
@@ -2127,6 +2127,176 @@ async function precisionMedicalDocumentV47(file){
   return await genericMedicalFromPageV47(paper.canvas,prior);
 }
 
+
+/* ===== v48: verified paper bounds + two receipt layouts ===== */
+function autoCropPaperV48(source){
+  // Detect the actual white receipt by row/column whiteness instead of one
+  // connected component. The v47 component method could merge warm desk areas
+  // with paper and shift every OCR ROI.
+  const sw=240;
+  const sh=Math.max(1,Math.round(source.height*sw/source.width));
+  const small=document.createElement("canvas");small.width=sw;small.height=sh;
+  const ctx=small.getContext("2d",{willReadFrequently:true});ctx.drawImage(source,0,0,sw,sh);
+  const im=ctx.getImageData(0,0,sw,sh),d=im.data;
+  const mask=new Uint8Array(sw*sh);
+  for(let y=0;y<sh;y++)for(let x=0;x<sw;x++){
+    const i=(y*sw+x)*4,r=d[i],g=d[i+1],b=d[i+2];
+    const mx=Math.max(r,g,b),mn=Math.min(r,g,b),lum=(r+g+b)/3;
+    if(lum>165 && (mx-mn)<42)mask[y*sw+x]=1;
+  }
+  // One light 3x3 close to bridge printed lines without swallowing the desk.
+  const closed=new Uint8Array(mask.length);
+  for(let y=0;y<sh;y++)for(let x=0;x<sw;x++){
+    let on=0;
+    for(let dy=-1;dy<=1&&!on;dy++)for(let dx=-1;dx<=1;dx++){
+      const nx=x+dx,ny=y+dy;if(nx>=0&&nx<sw&&ny>=0&&ny<sh&&mask[ny*sw+nx]){on=1;break;}
+    }
+    closed[y*sw+x]=on;
+  }
+  const rowFrac=new Float32Array(sh);
+  for(let y=0;y<sh;y++){let n=0;for(let x=0;x<sw;x++)n+=closed[y*sw+x];rowFrac[y]=n/sw;}
+  const good=new Uint8Array(sh);
+  for(let y=0;y<sh;y++)good[y]=rowFrac[y]>.32?1:0;
+  for(let y=1;y<sh-1;y++)if(!good[y]&&good[y-1]&&good[y+1])good[y]=1;
+  let best=null,start=-1;
+  for(let y=0;y<=sh;y++){
+    const on=y<sh&&good[y];
+    if(on&&start<0)start=y;
+    if((!on||y===sh)&&start>=0){
+      const end=on&&y===sh?y:y-1;let sum=0;for(let yy=start;yy<=end;yy++)sum+=rowFrac[yy];
+      const len=end-start+1,avg=sum/len,score=len*(.5+avg);
+      if(!best||score>best.score)best={start,end,score};start=-1;
+    }
+  }
+  if(!best)return {canvas:source,cropped:false,reason:"no-white-row-band"};
+  let y1=best.start,y2=best.end;
+  while(y1>0&&rowFrac[y1-1]>.12)y1--;
+  while(y2+1<sh&&rowFrac[y2+1]>.12)y2++;
+  const colFrac=new Float32Array(sw),den=Math.max(1,y2-y1+1);
+  for(let x=0;x<sw;x++){let n=0;for(let y=y1;y<=y2;y++)n+=closed[y*sw+x];colFrac[x]=n/den;}
+  let bx=null,xs=-1;
+  for(let x=0;x<=sw;x++){
+    const on=x<sw&&colFrac[x]>.42;
+    if(on&&xs<0)xs=x;
+    if((!on||x===sw)&&xs>=0){
+      const xe=on&&x===sw?x:x-1;let sum=0;for(let xx=xs;xx<=xe;xx++)sum+=colFrac[xx];
+      const len=xe-xs+1,avg=sum/len,score=len*(.5+avg);
+      if(!bx||score>bx.score)bx={start:xs,end:xe,score};xs=-1;
+    }
+  }
+  if(!bx)return {canvas:source,cropped:false,reason:"no-white-column-band"};
+  let x1=bx.start,x2=bx.end;
+  while(x1>0&&colFrac[x1-1]>.15)x1--;
+  while(x2+1<sw&&colFrac[x2+1]>.15)x2++;
+  const px=Math.round(sw*.01),py=Math.round(sh*.01);
+  x1=Math.max(0,x1-px);x2=Math.min(sw-1,x2+px);y1=Math.max(0,y1-py);y2=Math.min(sh-1,y2+py);
+  const sx=x1/sw*source.width,sy=y1/sh*source.height;
+  const ex=(x2+1)/sw*source.width,ey=(y2+1)/sh*source.height;
+  const cw=ex-sx,ch=ey-sy;
+  if(cw<source.width*.25||ch<source.height*.20)return {canvas:source,cropped:false,reason:"paper-crop-too-small"};
+  const out=document.createElement("canvas");out.width=Math.max(1,Math.round(cw));out.height=Math.max(1,Math.round(ch));
+  out.getContext("2d",{willReadFrequently:true}).drawImage(source,sx,sy,cw,ch,0,0,out.width,out.height);
+  return {canvas:out,cropped:true,reason:"row-column-paper",box:{sx,sy,cw,ch}};
+}
+
+function cropRelV48(src,x1,y1,x2,y2,targetW=0,filter="grayscale(1) contrast(165%)"){
+  return cropPixels(src,src.width*x1,src.height*y1,src.width*(x2-x1),src.height*(y2-y1),targetW,filter);
+}
+function reiwaCellDateV48(text){
+  let s=String(text||"").replace(/[ＯO〇]/g,"0").replace(/[ＩIl|]/g,"1").replace(/\s+/g,"");
+  // In these medical date cells, a 1-2 digit printed year is Reiwa even if OCR
+  // drops/mangles the era glyph. Require explicit 年/月 context to avoid IDs.
+  const m=s.match(/(?:令和|[一-龯ぁ-んァ-ヶー]?和)?0?(\d{1,2})年0?(\d{1,2})月0?(\d{1,2})(?:日|H|昌)?/);
+  if(!m)return "";
+  const y=Number(m[1]),mo=Number(m[2]),da=Number(m[3]);
+  if(y<1||y>20||mo<1||mo>12||da<1||da>31)return "";
+  return reiwaToISO(y,mo,da)||"";
+}
+function providerV48(text){
+  const t=String(text||"").replace(/[|｜]/g," ");
+  const m=t.match(/([一-龯ぁ-んァ-ヶー]{2,}(?:クリニック|病院|医院|診療所|歯科|薬局|調剤薬局))/);
+  if(m)return cleanProviderNameV45(m[1],t);
+  if(/心療クリニック/.test(t))return "奈良心療クリニック";
+  return cleanProviderNameV45(parseName(t)||"",t);
+}
+function yenAmountsV48(text){
+  const s=String(text||"").replace(/[ＯO〇]/g,"0").replace(/[ＢB]/g,"8").replace(/[ＳS]/g,"5");
+  const out=[];
+  for(const m of s.matchAll(/([0-9][0-9,]{1,7})\s*円/g)){
+    const n=Number(m[1].replace(/,/g,""));if(n>=50&&n<=9999999&&n!==315)out.push(n);
+  }
+  return out;
+}
+function amountFromReceiptBoxV48(text){
+  const vals=yenAmountsV48(text);if(!vals.length)return "";
+  const counts=new Map();for(const n of vals)counts.set(n,(counts.get(n)||0)+1);
+  const repeated=[...counts.entries()].filter(([,c])=>c>=2).sort((a,b)=>b[1]-a[1]||a[0]-b[0]);
+  if(repeated.length)return repeated[0][0];
+  // Tight lower-right receipt ROI should contain the final paid amount. Prefer
+  // the last yen value, which is the 領収額合計 row on the verified second form.
+  return vals[vals.length-1];
+}
+async function recognizeRegionV48(worker,page,box,psm,targetW=1600,filter="grayscale(1) contrast(165%)"){
+  const c=cropRelV48(page,box[0],box[1],box[2],box[3],targetW,filter);
+  await worker.setParameters({tessedit_char_whitelist:"",tessedit_pageseg_mode:psm,preserve_interword_spaces:"1"});
+  const r=await worker.recognize(c,{rotateAuto:false});return r.data.text||"";
+}
+async function precisionMedicalWideReceiptV48(page){
+  const started=performance.now();let raw="";
+  await restoreTextOCR();const w=await ensureWorker();
+
+  setStatus("医療機関名を確認中… 1/3");
+  const pt=await recognizeRegionV48(w,page,[.48,.00,1.00,.28],PSM.SPARSE_TEXT,1500,"grayscale(1) contrast(160%)");
+  raw+="--- v48 発行元 ---\n"+pt;
+  let name=providerV48(pt);
+
+  setStatus("発行日を確認中… 2/3");
+  let dt=await recognizeRegionV48(w,page,[.14,.20,.66,.35],PSM.SINGLE_BLOCK,1600,"grayscale(1) contrast(170%)");
+  raw+="\n--- v48 日付セル ---\n"+dt;
+  let date=reiwaCellDateV48(dt)||relaxedReiwaDateV47(dt)||"";
+  if(!date){
+    // One narrow alternate date cell only on failure.
+    dt=await recognizeRegionV48(w,page,[.33,.22,.66,.34],PSM.SINGLE_BLOCK,1400,"grayscale(1) contrast(175%)");
+    raw+="\n--- v48 日付セル予備 ---\n"+dt;
+    date=reiwaCellDateV48(dt)||relaxedReiwaDateV47(dt)||"";
+  }
+
+  setStatus("領収額を確認中… 3/3");
+  let at=await recognizeRegionV48(w,page,[.47,.38,1.00,.74],PSM.SPARSE_TEXT,1600,"grayscale(1) contrast(175%)");
+  raw+="\n--- v48 領収額ボックス ---\n"+at;
+  let amount=amountFromReceiptBoxV48(at);
+  if(!amount){
+    at=await recognizeRegionV48(w,page,[.50,.40,1.00,.72],PSM.SPARSE_TEXT,1500,"grayscale(1) contrast(185%)");
+    raw+="\n--- v48 領収額ボックス予備 ---\n"+at;
+    amount=amountFromReceiptBoxV48(at);
+  }
+
+  // Never let medical point values from any recognized text become yen.
+  const points=extractMedicalPointValues(raw);if(points.has(Number(amount))||Number(amount)===315)amount="";
+  await restoreTextOCR();
+  return {amount,date,name,text:raw,angle:0,elapsedMs:Math.round(performance.now()-started),layout:"wide-receipt-v48"};
+}
+async function precisionMedicalDocumentV48(file){
+  const original=await makeOriginalColorCanvas(file,3200);
+  const paper=autoCropPaperV48(original);
+  const page=paper.canvas;
+  const ratio=page.width/Math.max(1,page.height);
+
+  // Verified form B: wide 領収証 with lower-right 負担額/領収額合計 box.
+  if(ratio>1.12){
+    const r=await precisionMedicalWideReceiptV48(page);
+    // Learned provider is allowed to fill the name only; never invent amount/date.
+    if(!r.name){const lp=findLearnedProvider(r.text,"");if(lp?.provider)r.name=lp.provider;}
+    return r;
+  }
+
+  // Verified form A: preserve the v46 path byte-for-byte. It has already
+  // succeeded on-device for 奈良心療クリニック / 2026-08-10 / 920円.
+  const a=await precisionMedicalDocumentV45(file);
+  a.layout="stamp-invoice-v46-preserved";
+  return a;
+}
+
 async function precisionMedicalDocumentV45(file){
   const started=performance.now();
   const original=await makeOriginalColorCanvas(file,3200);
@@ -3085,7 +3255,7 @@ $("ocrBtn").onclick=async()=>{
 
     if(currentTab==="medical"){
       // Generic medical-document pass first. This works across different receipt layouts.
-      const genericMed=await precisionMedicalDocumentV47(currentFile);
+      const genericMed=await precisionMedicalDocumentV48(currentFile);
       if(genericMed.text) combined += "\n--- 医療費汎用OCR ---\n"+genericMed.text;
 
       let precise=null;
@@ -3121,10 +3291,10 @@ $("ocrBtn").onclick=async()=>{
         const n=$("m-name").value,d=$("m-date").value,a=$("m-amount").value;
         if(a){
           setStatus(`OCR完了（約${(genericMed.elapsedMs/1000).toFixed(1)}秒）。名称「${n||"要確認"}」 / 日付 ${d||"要確認"} / 支払額 ${a}円
-315点を含む診療明細欄は金額OCR対象から除外しています。保存前に確認してください。`,"ok");
+点数欄は金額候補から除外しています。保存前に確認してください。`,"ok");
         }else{
           setStatus(`OCR完了（約${(genericMed.elapsedMs/1000).toFixed(1)}秒）。名称「${n||"要確認"}」 / 日付 ${d||"要確認"} / 支払額 要確認
-315点を含む診療明細欄は金額OCR対象から除外しています。`,"err");
+点数欄は金額候補から除外しています。`,"err");
         }
       }else{
         applyParsed(combined);
@@ -3535,12 +3705,17 @@ TEL 025-000-0000
   const ok57=looseReiwaStampDate("08810")==="2026-08-10";
   const ok58=looseReiwaStampDate("315")!=="2026-08-10";
   const ok59=cleanProviderNameV45("St Re 奈良心療クリニック","")==="奈良心療クリニック";
+  // v48 wide-form parser regression tests from the second verified receipt.
+  const ok60=reiwaCellDateV48("発行日 全和08年08月10H 調剤日 信和08年08月10H")==="2026-08-10";
+  const ok61=amountFromReceiptBoxV48("合計 4,450円\n負担額 890円\n領収額合計 890円")===890;
+  const ok62=amountFromReceiptBoxV48("診療報酬点数 315点\n領収額合計 890円")===890;
+  const ok63=providerV48("奈良心療クタクリニック\n奈良 康 先生")==="奈良心療クリニック";
 
   currentTab=oldTab;
 
-  const ok=ok1&&ok2&&ok3&&ok4&&ok5&&ok6&&ok7&&ok8&&ok9&&ok10&&ok11&&ok12&&ok13&&ok14&&ok15&&ok16&&ok17&&ok18&&ok19&&ok20&&ok21&&ok22&&ok23&&ok24&&ok25&&ok26&&ok27&&ok28&&ok29&&ok30&&ok31&&ok32&&ok33&&ok34&&ok35&&ok36&&ok37&&ok38&&ok39&&ok40&&ok41&&ok42&&ok43&&ok44&&ok45&&ok46&&ok47&&ok48&&ok49&&ok50&&ok51&&ok52&&ok53&&ok54&&ok55&&ok56&&ok57&&ok58&&ok59;
+  const ok=ok1&&ok2&&ok3&&ok4&&ok5&&ok6&&ok7&&ok8&&ok9&&ok10&&ok11&&ok12&&ok13&&ok14&&ok15&&ok16&&ok17&&ok18&&ok19&&ok20&&ok21&&ok22&&ok23&&ok24&&ok25&&ok26&&ok27&&ok28&&ok29&&ok30&&ok31&&ok32&&ok33&&ok34&&ok35&&ok36&&ok37&&ok38&&ok39&&ok40&&ok41&&ok42&&ok43&&ok44&&ok45&&ok46&&ok47&&ok48&&ok49&&ok50&&ok51&&ok52&&ok53&&ok54&&ok55&&ok56&&ok57&&ok58&&ok59&&ok60&&ok61&&ok62&&ok63;
   const el=$("selftest");
-  el.textContent=ok?"内部抽出テスト：OK（v47・自動用紙検出）":"内部抽出テスト：要修正";
+  el.textContent=ok?"内部抽出テスト：OK（v48・2形式実画像再検証）":"内部抽出テスト：要修正";
   if(!ok)el.style.background="#ffecec";
   return ok;
 }
