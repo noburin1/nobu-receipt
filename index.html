@@ -4,7 +4,13 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#f5f5f7">
-<title>のぶ帳簿 製品版 v1.0 自動書類検出・自動シャッター</title>
+<title>のぶ帳簿 公開製品版 v1.1</title>
+<link rel="manifest" href="./manifest.webmanifest">
+<link rel="icon" href="./icon.svg" type="image/svg+xml">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="のぶ帳簿">
+<meta name="mobile-web-app-capable" content="yes">
 <style>
 :root{font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif;color:#111;background:#f5f5f7}
 *{box-sizing:border-box}
@@ -99,11 +105,11 @@ footer{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(
 </style>
 </head>
 <body>
-<header><h1>のぶ帳簿 <span class="ver">製品版 v1.0・自動書類検出・自動シャッター</span></h1></header>
+<header><h1>のぶ帳簿 <span class="ver">公開製品版 v1.1・誰でも利用可能</span></h1></header>
 
 <div class="card">
-  <span id="selftest" class="badge">内部テスト中…</span><span class="badge" style="margin-left:6px">PaddleOCR不使用</span><span class="badge" style="margin-left:6px">店名学習ON</span>
-  <p class="small">無料・APIキー不要。OCR画像は外部APIへ送信せず、Safari内で処理します。初回のみOCRライブラリ/日本語データをCDNから取得します。</p>
+  <span id="selftest" class="badge">内部テスト中…</span><span class="badge" style="margin-left:6px">公開版</span><span class="badge" style="margin-left:6px">PaddleOCR不使用</span><span class="badge" style="margin-left:6px">店名学習ON</span>
+  <p class="small">無料・APIキー不要。OCR画像は外部APIへ送信せず、Safari内で処理します。初回のみOCRライブラリ/日本語データをCDNから取得します。 だれでもこのURLから利用できます。帳簿データと学習内容は利用者ごとの端末内に保存され、他の利用者とは共有されません。</p>
 </div>
 
 <div class="card">
@@ -240,28 +246,15 @@ footer{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(
 </div>
 
 <script>
-const APP_VERSION="product-1.0";
+const APP_VERSION="public-1.1";
 
-// Remove legacy service workers/caches from older PaddleOCR/PWA builds.
-// Bookkeeping data in localStorage is intentionally preserved.
-(async()=>{
-  try{
-    if("serviceWorker" in navigator){
-      const regs=await navigator.serviceWorker.getRegistrations();
-      await Promise.all(regs.map(r=>r.unregister()));
-    }
-    if("caches" in window){
-      const names=await caches.keys();
-      await Promise.all(
-        names
-          .filter(n=>/nobu-receipt|paddle|ocr/i.test(n))
-          .map(n=>caches.delete(n))
-      );
-    }
-  }catch(e){
-    console.warn("legacy cache cleanup skipped",e);
+// Public PWA: each person's bookkeeping data remains only in that device's localStorage.
+// The app shell is cached for launch/offline use; OCR language/runtime files are fetched when needed.
+window.addEventListener("load",()=>{
+  if("serviceWorker" in navigator){
+    navigator.serviceWorker.register("./sw.js",{scope:"./"}).catch(e=>console.warn("service worker registration failed",e));
   }
-})();
+});
 
 const KEY="nobu-receipt-v3";
 

@@ -1,10 +1,19 @@
 {
-  "name": "のぶ帳簿 FREE",
+  "name": "のぶ帳簿",
   "short_name": "のぶ帳簿",
-  "start_url": "./?v=11",
+  "description": "レシート・医療領収書を撮影し、端末内で帳簿に記録する無料PWA",
+  "start_url": "./",
+  "scope": "./",
   "display": "standalone",
-  "background_color": "#f3f4f6",
-  "theme_color": "#111827",
+  "background_color": "#f5f5f7",
+  "theme_color": "#f5f5f7",
   "lang": "ja",
-  "description": "無料・カード不要・APIキー不要のiPhone帳簿。PaddleOCRを端末内実行。"
+  "icons": [
+    {
+      "src": "./icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
 }
