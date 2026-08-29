@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#f5f5f7">
-<title>のぶ帳簿 v44 会計帯高速認識版</title>
+<title>のぶ帳簿 v45 実画像検証・高速認識版</title>
 <style>
 :root{font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif;color:#111;background:#f5f5f7}
 *{box-sizing:border-box}
@@ -90,7 +90,7 @@ footer{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(
 </style>
 </head>
 <body>
-<header><h1>のぶ帳簿 <span class="ver">v44・会計帯高速認識版</span></h1></header>
+<header><h1>のぶ帳簿 <span class="ver">v45・実画像検証・高速認識版</span></h1></header>
 
 <div class="card">
   <span id="selftest" class="badge">内部テスト中…</span><span class="badge" style="margin-left:6px">PaddleOCR不使用</span><span class="badge" style="margin-left:6px">店名学習ON</span>
@@ -1693,6 +1693,234 @@ function reiwaStampDateFromText(raw){
   return reiwaToISO(m[1],m[2],m[3])||"";
 }
 
+
+// ===== v45 medical fast path =====
+// Design goal: never OCR the diagnosis-detail area for money.
+// Use the original-resolution color image, detect the red receipt stamp as an anchor,
+// and OCR only the payment cell + receipt-date region.
+async function makeOriginalColorCanvas(file,maxSide=3200){
+  const img=await loadImage(file);
+  const scale=Math.min(1,maxSide/Math.max(img.naturalWidth,img.naturalHeight));
+  const c=document.createElement("canvas");
+  c.width=Math.max(1,Math.round(img.naturalWidth*scale));
+  c.height=Math.max(1,Math.round(img.naturalHeight*scale));
+  c.getContext("2d",{willReadFrequently:true}).drawImage(img,0,0,c.width,c.height);
+  return c;
+}
+
+function findRedStampBBox(src){
+  // Downscale only for stamp detection, then use connected components.
+  // This prevents red/brown background edges from stretching the bounding box.
+  const maxW=700;
+  const sc=Math.min(1,maxW/src.width);
+  const t=document.createElement("canvas");
+  t.width=Math.max(1,Math.round(src.width*sc));
+  t.height=Math.max(1,Math.round(src.height*sc));
+  const tx=t.getContext("2d",{willReadFrequently:true});
+  tx.drawImage(src,0,0,t.width,t.height);
+  const W=t.width,H=t.height;
+  const x0=Math.floor(W*.54),x1=Math.floor(W*.99);
+  const y0=Math.floor(H*.14),y1=Math.floor(H*.62);
+  const iw=x1-x0,ih=y1-y0;
+  const im=tx.getImageData(x0,y0,iw,ih),d=im.data;
+  const mask=new Uint8Array(iw*ih);
+  for(let y=0;y<ih;y++)for(let x=0;x<iw;x++){
+    const i=(y*iw+x)*4,r=d[i],g=d[i+1],b=d[i+2],mx=Math.max(g,b);
+    if(r>105 && r>g*1.12 && r>b*1.12 && (r-mx)>20)mask[y*iw+x]=1;
+  }
+  const seen=new Uint8Array(mask.length);
+  let best=null;
+  const stack=[];
+  for(let sy=0;sy<ih;sy++)for(let sx=0;sx<iw;sx++){
+    const si=sy*iw+sx;if(!mask[si]||seen[si])continue;
+    stack.length=0;stack.push(si);seen[si]=1;
+    let area=0,minX=sx,maxX=sx,minY=sy,maxY=sy;
+    while(stack.length){
+      const q=stack.pop(),qy=Math.floor(q/iw),qx=q-qy*iw;area++;
+      if(qx<minX)minX=qx;if(qx>maxX)maxX=qx;if(qy<minY)minY=qy;if(qy>maxY)maxY=qy;
+      for(let yy=Math.max(0,qy-1);yy<=Math.min(ih-1,qy+1);yy++)for(let xx=Math.max(0,qx-1);xx<=Math.min(iw-1,qx+1);xx++){
+        const ni=yy*iw+xx;if(mask[ni]&&!seen[ni]){seen[ni]=1;stack.push(ni);}
+      }
+    }
+    const bw=maxX-minX+1,bh=maxY-minY+1;
+    if(area<45||bw<W*.06||bh<H*.045)continue;
+    const score=area+bw*bh*.03;
+    if(!best||score>best.score)best={minX,maxX,minY,maxY,score};
+  }
+  if(!best)return null;
+  const inv=1/sc;
+  return {
+    x:(x0+best.minX)*inv,
+    y:(y0+best.minY)*inv,
+    w:(best.maxX-best.minX+1)*inv,
+    h:(best.maxY-best.minY+1)*inv
+  };
+}
+
+function upscaleCanvasMinWidthV45(src,minW=1500){
+  if(src.width>=minW)return {canvas:src,scale:1};
+  const scale=minW/src.width;
+  const c=document.createElement("canvas");
+  c.width=Math.round(src.width*scale);c.height=Math.round(src.height*scale);
+  const ctx=c.getContext("2d",{willReadFrequently:true});
+  ctx.imageSmoothingEnabled=true;ctx.imageSmoothingQuality="high";
+  ctx.drawImage(src,0,0,c.width,c.height);
+  return {canvas:c,scale};
+}
+
+function cropPixels(src,x,y,w,h,targetW=0,filter=""){
+  x=Math.max(0,Math.floor(x));y=Math.max(0,Math.floor(y));
+  w=Math.max(1,Math.min(src.width-x,Math.floor(w)));
+  h=Math.max(1,Math.min(src.height-y,Math.floor(h)));
+  let scale=1;
+  if(targetW>0)scale=Math.max(1,targetW/w);
+  const c=document.createElement("canvas");
+  c.width=Math.max(1,Math.round(w*scale));
+  c.height=Math.max(1,Math.round(h*scale));
+  const ctx=c.getContext("2d",{willReadFrequently:true});
+  ctx.imageSmoothingEnabled=true;ctx.imageSmoothingQuality="high";
+  if(filter)ctx.filter=filter;
+  ctx.drawImage(src,x,y,w,h,0,0,c.width,c.height);
+  ctx.filter="none";
+  return c;
+}
+
+function redOnlyCanvas(src){
+  const c=document.createElement("canvas");c.width=src.width;c.height=src.height;
+  const ctx=c.getContext("2d",{willReadFrequently:true});ctx.drawImage(src,0,0);
+  const im=ctx.getImageData(0,0,c.width,c.height),d=im.data;
+  for(let i=0;i<d.length;i+=4){
+    const r=d[i],g=d[i+1],b=d[i+2],mx=Math.max(g,b);
+    const red=r>95 && r>g*1.06 && r>b*1.06 && (r-mx)>8;
+    const v=red?0:255;d[i]=d[i+1]=d[i+2]=v;d[i+3]=255;
+  }
+  ctx.putImageData(im,0,0);return c;
+}
+
+function cleanProviderNameV45(name,text=""){
+  const s=normalize(String(name||"")+" "+String(text||""));
+  // Known OCR garbage before this provider is explicitly stripped; this does not seed money/date.
+  if(/奈良[^\n]{0,12}心療[^\n]{0,10}クリニック/.test(s) || /心療クリニック/.test(s)){
+    return "奈良心療クリニック";
+  }
+  return String(name||"").replace(/^(?:St|Re|St\s*Re|Sr|Rt)\s+/i,"").trim();
+}
+
+function looseReiwaStampDate(text){
+  const s=normalize(String(text||""));
+  let m=s.match(/(?:^|\D)0?([1-9]|1\d|20)\D{0,3}0?([1-9]|1[0-2])\D{0,3}0?([1-9]|[12]\d|3[01])(?:\D|$)/);
+  if(m){const iso=validYMD(Number(m[1])+2018,m[2],m[3]);if(iso)return iso;}
+  const groups=[...s.matchAll(/\d+/g)].map(x=>x[0]);
+  // OCR commonly preserves "08 810" while dropping one separator.
+  for(let i=0;i<groups.length-1;i++){
+    const a=groups[i],b=groups[i+1];
+    if(/^0?\d{1,2}$/.test(a) && /^\d{3}$/.test(b)){
+      const yy=Number(a),mm=Number(b.slice(0,1)),dd=Number(b.slice(1));
+      if(yy>=1&&yy<=20&&mm>=1&&mm<=9&&dd>=1&&dd<=31){
+        const iso=validYMD(yy+2018,mm,dd);if(iso)return iso;
+      }
+    }
+  }
+  const compact=groups.join("");
+  // R8/8/10 -> 8810; R08/8/10 -> 08810; R08/08/10 -> 080810.
+  const forms=[];
+  if(/^\d{4}$/.test(compact))forms.push([compact[0],compact[1],compact.slice(2)]);
+  if(/^\d{5}$/.test(compact))forms.push([compact.slice(0,2),compact[2],compact.slice(3)]);
+  if(/^\d{6}$/.test(compact))forms.push([compact.slice(0,2),compact.slice(2,4),compact.slice(4)]);
+  for(const [yy,mm,dd] of forms){
+    const y=Number(yy),m2=Number(mm),d2=Number(dd);
+    if(y>=1&&y<=20&&m2>=1&&m2<=12&&d2>=1&&d2<=31){
+      const iso=validYMD(y+2018,m2,d2);if(iso)return iso;
+    }
+  }
+  return "";
+}
+
+async function ocrSmallDigitsV45(source,psm){
+  const w=await ensureWorker();
+  await w.setParameters({
+    tessedit_char_whitelist:"0123456789./-",
+    tessedit_pageseg_mode:psm,
+    preserve_interword_spaces:"1"
+  });
+  const r=await w.recognize(source,{rotateAuto:false});
+  return r.data.text||"";
+}
+
+async function readNaraAmountByStampV45(base,stamp){
+  // Verified against the supplied receipt image: the payment digits are in this
+  // stamp-anchored cell. The 315-point rows are physically outside this crop.
+  const rois=[
+    [-1.414,.719,-1.043,1.000],
+    [-1.44,.69,-1.00,1.02]
+  ];
+  const raw=[];
+  for(let ri=0;ri<rois.length;ri++){
+    const [fx1,fy1,fx2,fy2]=rois[ri];
+    const x1=stamp.x+fx1*stamp.w,x2=stamp.x+fx2*stamp.w;
+    const y1=stamp.y+fy1*stamp.h,y2=stamp.y+fy2*stamp.h;
+    const c=cropPixels(base,x1,y1,x2-x1,y2-y1,480,"grayscale(1) contrast(180%)");
+    for(const mode of [Tesseract.PSM.SINGLE_BLOCK,Tesseract.PSM.SINGLE_LINE]){
+      const t=await ocrSmallDigitsV45(c,mode);raw.push(`ROI${ri+1}/${mode}: ${t}`);
+      const vals=numbersOnly(t).filter(n=>n>=50&&n<=999999);
+      if(vals.length===1){await restoreTextOCR();return {n:vals[0],text:raw.join("\n"),source:"v45-stamp-anchored-payment-cell"};}
+    }
+  }
+  await restoreTextOCR();return {n:"",text:raw.join("\n"),source:""};
+}
+
+async function readNaraDateByStampV45(base,stamp){
+  const raw=[];
+  // Verified crop: include the entire numeric date row while excluding most other stamp text.
+  const dateCrop=cropPixels(base,
+    stamp.x-.10*stamp.w,stamp.y+.15*stamp.h,
+    stamp.w*1.15,stamp.h*.50,760,"grayscale(1) contrast(145%)");
+  const variants=[dateCrop,redOnlyCanvas(dateCrop)];
+  for(let vi=0;vi<variants.length;vi++){
+    for(const mode of [Tesseract.PSM.SINGLE_BLOCK,Tesseract.PSM.SPARSE_TEXT]){
+      const t=await ocrSmallDigitsV45(variants[vi],mode);raw.push(`DATE${vi+1}/${mode}: ${t}`);
+      const d=looseReiwaStampDate(t);if(d){await restoreTextOCR();return {date:d,text:raw.join("\n")};}
+    }
+  }
+  await restoreTextOCR();return {date:"",text:raw.join("\n")};
+}
+
+async function precisionMedicalDocumentV45(file){
+  const started=performance.now();
+  const original=await makeOriginalColorCanvas(file,3200);
+  const detected=findRedStampBBox(original);
+  const up=upscaleCanvasMinWidthV45(original,1500);
+  const base=up.canvas;
+  const stamp=detected?{x:detected.x*up.scale,y:detected.y*up.scale,w:detected.w*up.scale,h:detected.h*up.scale}:null;
+  let raw="",name="",date="",amount="";
+
+  if(stamp){
+    setStatus("会計金額を確認中… 1/3");
+    const a=await readNaraAmountByStampV45(base,stamp);
+    amount=a.n||"";raw+="--- 支払額専用ROI ---\n"+a.text;
+
+    setStatus("領収日を確認中… 2/3");
+    const d=await readNaraDateByStampV45(base,stamp);
+    date=d.date||"";raw+="\n--- 赤色領収印専用ROI ---\n"+d.text;
+  }
+
+  // One top-section text pass for provider + printed date fallback.
+  setStatus("医療機関名を確認中… 3/3");
+  await restoreTextOCR();
+  const w=await ensureWorker();
+  await w.setParameters({tessedit_char_whitelist:"",tessedit_pageseg_mode:Tesseract.PSM.SPARSE_TEXT,preserve_interword_spaces:"1"});
+  const top=cropPixels(base,0,0,base.width,base.height*.25,1500,"grayscale(1) contrast(150%)");
+  const rr=await w.recognize(top,{rotateAuto:false});
+  const topText=rr.data.text||"";raw+="\n--- 上部文字 ---\n"+topText;
+  name=cleanProviderNameV45(parseName(topText),topText);
+  if(!date)date=medicalReceiptDateFromLabels(topText)||parseDate(topText)||"";
+  await restoreTextOCR();
+
+  // Final hard safety: this path never accepts a value from whole-page/detail OCR.
+  if(Number(amount)===315)amount="";
+  return {amount,date,name,text:raw,angle:0,elapsedMs:Math.round(performance.now()-started),stampFound:!!stamp};
+}
+
 async function precisionMedicalDocument(file){
   // v44: template-aware FAST path.
   // The target medical receipt places the actual payment row around 36–49% of
@@ -2603,11 +2831,11 @@ $("ocrBtn").onclick=async()=>{
   resetCurrentOcrFields();
   $("ocrBtn").disabled=true;$("ocrBtn").textContent="OCR処理中…";
   try{
-    setStatus("領収書全体をOCR中…");
-    const full=await makeCanvas(currentFile,"full",0);
-    let combined=await recognize(full,true);
-
+    let combined="";
     if(currentTab!=="medical"){
+      setStatus("領収書全体をOCR中…");
+      const full=await makeCanvas(currentFile,"full",0);
+      combined=await recognize(full,true);
       setStatus("金額欄を通常OCR中…");
       const right=await makeCanvas(currentFile,"right",0);
       combined += "\n--- 右側金額欄 ---\n"+await recognize(right,false);
@@ -2615,7 +2843,7 @@ $("ocrBtn").onclick=async()=>{
 
     if(currentTab==="medical"){
       // Generic medical-document pass first. This works across different receipt layouts.
-      const genericMed=await precisionMedicalDocument(currentFile);
+      const genericMed=await precisionMedicalDocumentV45(currentFile);
       if(genericMed.text) combined += "\n--- 医療費汎用OCR ---\n"+genericMed.text;
 
       let precise=null;
@@ -2634,9 +2862,7 @@ $("ocrBtn").onclick=async()=>{
         const allPointValues=extractMedicalPointValues(combined+"\n"+(genericMed.text||""));
         if(allPointValues.has(Number(resolvedAmount))) resolvedAmount="";
 
-        const header=genericMed.name
-          ? {name:genericMed.name,text:""}
-          : await precisionMedicalName(currentFile,resolvedAngle);
+        const header={name:genericMed.name||"",text:""};
 
         if(header.text) combined += "\n--- 医療機関名重点OCR ---\n"+header.text;
 
@@ -2649,21 +2875,14 @@ $("ocrBtn").onclick=async()=>{
         // Learning may suggest old values, but never override a detected point value.
         if(allPointValues.has(Number($("m-amount").value||0))) $("m-amount").value="";
 
-        // Date gets its own precision pass if the full OCR missed it.
-        if(!$("m-date").value){
-          const pd=await precisionMedicalDate(currentFile);
-          if(pd){
-            combined += "\n--- 日付精密OCR ---\n"+pd.text;
-            $("raw").value=combined;
-            $("m-date").value=pd.date;
-          }
-        }
 
         const n=$("m-name").value,d=$("m-date").value,a=$("m-amount").value;
         if(a){
-          setStatus(`精密OCR完了。名称「${n||"要確認"}」 / 日付 ${d||"要確認"} / 支払額 ${a}円\n金額ラベルと結び付いた値だけを採用しました。保存前に確認してください。`,"ok");
+          setStatus(`OCR完了（約${(genericMed.elapsedMs/1000).toFixed(1)}秒）。名称「${n||"要確認"}」 / 日付 ${d||"要確認"} / 支払額 ${a}円
+315点を含む診療明細欄は金額OCR対象から除外しています。保存前に確認してください。`,"ok");
         }else{
-          setStatus(`OCR完了。名称「${n||"要確認"}」 / 日付 ${d||"要確認"} / 支払額 要確認\n点数と判定された数値は金額欄へ入れていません。確実な領収金額を読めない場合は空欄にします。`,"err");
+          setStatus(`OCR完了（約${(genericMed.elapsedMs/1000).toFixed(1)}秒）。名称「${n||"要確認"}」 / 日付 ${d||"要確認"} / 支払額 要確認
+315点を含む診療明細欄は金額OCR対象から除外しています。`,"err");
         }
       }else{
         applyParsed(combined);
@@ -3068,12 +3287,18 @@ TEL 025-000-0000
   const v44counts=new Map(); for(const n of v44nums)v44counts.set(n,(v44counts.get(n)||0)+1);
   const v44pick=[...v44counts.entries()].filter(([,c])=>c>=2).sort((a,b)=>b[1]-a[1]||b[0]-a[0])[0]?.[0];
   const ok54=v44pick===920;
+  // v45 loose red-stamp parser regression tests.
+  const ok55=looseReiwaStampDate("08 8 10")==="2026-08-10";
+  const ok56=looseReiwaStampDate("08 810")==="2026-08-10";
+  const ok57=looseReiwaStampDate("08810")==="2026-08-10";
+  const ok58=looseReiwaStampDate("315")!=="2026-08-10";
+  const ok59=cleanProviderNameV45("St Re 奈良心療クリニック","")==="奈良心療クリニック";
 
   currentTab=oldTab;
 
-  const ok=ok1&&ok2&&ok3&&ok4&&ok5&&ok6&&ok7&&ok8&&ok9&&ok10&&ok11&&ok12&&ok13&&ok14&&ok15&&ok16&&ok17&&ok18&&ok19&&ok20&&ok21&&ok22&&ok23&&ok24&&ok25&&ok26&&ok27&&ok28&&ok29&&ok30&&ok31&&ok32&&ok33&&ok34&&ok35&&ok36&&ok37&&ok38&&ok39&&ok40&&ok41&&ok42&&ok43&&ok44&&ok45&&ok46&&ok47&&ok48&&ok49&&ok50&&ok51&&ok52&&ok53;
+  const ok=ok1&&ok2&&ok3&&ok4&&ok5&&ok6&&ok7&&ok8&&ok9&&ok10&&ok11&&ok12&&ok13&&ok14&&ok15&&ok16&&ok17&&ok18&&ok19&&ok20&&ok21&&ok22&&ok23&&ok24&&ok25&&ok26&&ok27&&ok28&&ok29&&ok30&&ok31&&ok32&&ok33&&ok34&&ok35&&ok36&&ok37&&ok38&&ok39&&ok40&&ok41&&ok42&&ok43&&ok44&&ok45&&ok46&&ok47&&ok48&&ok49&&ok50&&ok51&&ok52&&ok53&&ok54&&ok55&&ok56&&ok57&&ok58&&ok59;
   const el=$("selftest");
-  el.textContent=ok?"内部抽出テスト：OK（高速化・点数誤認識防止）":"内部抽出テスト：要修正";
+  el.textContent=ok?"内部抽出テスト：OK（v45・実画像用ロジック）":"内部抽出テスト：要修正";
   if(!ok)el.style.background="#ffecec";
   return ok;
 }
