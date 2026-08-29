@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#f5f5f7">
-<title>のぶ帳簿 v42 点数誤認識防止版</title>
+<title>のぶ帳簿 v43 高速・医療OCR改良版</title>
 <style>
 :root{font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif;color:#111;background:#f5f5f7}
 *{box-sizing:border-box}
@@ -90,7 +90,7 @@ footer{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(
 </style>
 </head>
 <body>
-<header><h1>のぶ帳簿 <span class="ver">v42・点数誤認識防止版</span></h1></header>
+<header><h1>のぶ帳簿 <span class="ver">v43・高速医療OCR改良版</span></h1></header>
 
 <div class="card">
   <span id="selftest" class="badge">内部テスト中…</span><span class="badge" style="margin-left:6px">PaddleOCR不使用</span><span class="badge" style="margin-left:6px">店名学習ON</span>
@@ -957,19 +957,26 @@ function medicalAmountFromLabels(text){
         });
       }
 
-      // Safety-first: a split-line amount is accepted only on the immediately
-      // following line and only when that line explicitly contains 円.
+      // Split-line amount: accept an explicit 円 line, or a numeric-only line
+      // immediately after a STRONG payment label. This catches table OCR where
+      // the label and value are separated, while still rejecting detail-table points.
       const j=i+1;
       if(j<lines.length){
         const target=lines[j];
-        if(!forbidden.test(target) && /円/.test(target)){
-          for(const n of amountsInLine(target)){
-            if(n<10||pointValues.has(n))continue;
+        const next2=lines[j+1]||"";
+        const targetNums=amountsInLine(target);
+        const strongLabel=label.score>=2000;
+        const numericOnly=/^[￥¥]?\s*[0-9,]+\s*(?:円)?$/.test(target);
+        const pointNearby=forbidden.test(target)||/点|点数|診療報酬|保険点数|総点数|請求点数/i.test(next2);
+        const allowed=/円/.test(target) || (strongLabel && numericOnly && !pointNearby);
+        if(allowed){
+          for(const n of targetNums){
+            if(n<50||pointValues.has(n))continue;
             candidates.push({
               n,
               score:label.score-120,
               line:target,
-              source:label.source+"-next-line-yen"
+              source:label.source+( /円/.test(target) ? "-next-line-yen" : "-next-line-number" )
             });
           }
         }
@@ -1650,27 +1657,86 @@ async function precisionMedicalReceiptAmount(file){
   return best;
 }
 
-async function precisionMedicalDocument(file){
-  // Dedicated passes for each field. Do not let detail-table OCR decide them.
-  const invoiceHeader=await precisionMedicalInvoiceHeader(file);
-  const provider=invoiceHeader.name
-    ? invoiceHeader
-    : await precisionMedicalProvider(file);
-  const receiptDate=await precisionMedicalReceiptDate(file);
-  const receiptAmount=await precisionMedicalReceiptAmount(file);
+async function makeRedDateCanvas(source){
+  const c=document.createElement("canvas");
+  c.width=source.width; c.height=source.height;
+  const ctx=c.getContext("2d",{willReadFrequently:true});
+  ctx.drawImage(source,0,0);
+  const img=ctx.getImageData(0,0,c.width,c.height);
+  const d=img.data;
+  for(let i=0;i<d.length;i+=4){
+    const r=d[i],g=d[i+1],b=d[i+2];
+    const red=(r>105 && r>g*1.18 && r>b*1.18 && (r-Math.max(g,b))>25);
+    const v=red?0:255;
+    d[i]=d[i+1]=d[i+2]=v; d[i+3]=255;
+  }
+  ctx.putImageData(img,0,0);
+  return c;
+}
 
-  const texts=[
-    provider?.text||"",
-    receiptDate?.text||"",
-    receiptAmount?.text||""
-  ].filter(Boolean);
+function reiwaStampDateFromText(raw){
+  const s=normalize(raw);
+  const m=s.match(/(?:^|[^\d])0?([1-9]|1\d|20)[\/.\-]0?(\d{1,2})[\/.\-]0?(\d{1,2})(?:[^\d]|$)/);
+  if(!m)return "";
+  return reiwaToISO(m[1],m[2],m[3])||"";
+}
+
+async function precisionMedicalDocument(file){
+  // v43 FAST path: one broad upper-document OCR + at most two focused fallbacks.
+  // Camera guide keeps the receipt upright, so 90/-90 multi-pass OCR is removed.
+  await restoreTextOCR();
+  const w=await ensureWorker();
+  const base=await makeMedicalHiResCanvas(file);
+  const upper=cropCanvas(base,0.00,0.00,1.00,0.72,1.15);
+
+  setStatus("医療領収書を高速OCR中… 1/3");
+  await w.setParameters({
+    tessedit_char_whitelist:"",
+    tessedit_pageseg_mode:Tesseract.PSM.SPARSE_TEXT,
+    preserve_interword_spaces:"1"
+  });
+  let r=await w.recognize(upper,{rotateAuto:false});
+  let raw=r.data.text||"";
+
+  let name=parseName(raw);
+  let date=medicalReceiptDateFromLabels(raw)||medicalDateFromDocument(raw)||"";
+  let amt=medicalAmountFromLabels(raw);
+
+  // One focused accounting pass only when the broad pass did not find a safe amount.
+  if(!amt){
+    setStatus("領収金額を確認中… 2/3");
+    const account=cropCanvas(base,0.00,0.16,1.00,0.62,1.55);
+    r=await w.recognize(account,{rotateAuto:false});
+    const atext=r.data.text||"";
+    raw += "\n--- 会計欄 ---\n"+atext;
+    amt=medicalAmountFromLabels(atext)||medicalAmountFromLabels(raw);
+    if(!name)name=parseName(atext)||name;
+    if(!date)date=medicalReceiptDateFromLabels(atext)||medicalDateFromDocument(atext)||"";
+  }
+
+  // Red receipt stamp is often faint in grayscale. Isolate red only if date is still missing.
+  if(!date){
+    setStatus("領収印の日付を確認中… 3/3");
+    const stampArea=cropCanvas(base,0.00,0.00,1.00,0.58,1.5);
+    const red=await makeRedDateCanvas(stampArea);
+    await w.setParameters({
+      tessedit_char_whitelist:"0123456789./-年月日令和",
+      tessedit_pageseg_mode:Tesseract.PSM.SPARSE_TEXT,
+      preserve_interword_spaces:"1"
+    });
+    r=await w.recognize(red,{rotateAuto:false});
+    const dtext=r.data.text||"";
+    raw += "\n--- 赤色領収印 ---\n"+dtext;
+    date=medicalReceiptDateFromLabels(dtext)||reiwaStampDateFromText(dtext)||"";
+    await restoreTextOCR();
+  }
 
   return {
-    amount:receiptAmount?.amount||"",
-    date:receiptDate?.date||"",
-    name:provider?.name||"",
-    text:texts.join("\n--- medical dedicated pass ---\n"),
-    angle:receiptAmount?.angle||receiptDate?.angle||provider?.angle||0
+    amount:amt?.n||"",
+    date,
+    name,
+    text:raw,
+    angle:0
   };
 }
 
@@ -1750,44 +1816,27 @@ async function precisionMedicalName(file,angle){
 }
 
 async function precisionMedicalDate(file){
-  // Search the receipt header/date area in all common camera orientations.
-  const angles=[90,-90,0];
-  const zones=[
-    [0.02,0.02,0.98,0.42],   // top/header
-    [0.02,0.15,0.98,0.62],   // upper-middle
-    [0.18,0.02,0.82,0.55],   // center header
-    [0.00,0.00,1.00,1.00]    // full fallback
-  ];
-
-  await restoreTextOCR();
-  const w=await ensureWorker();
-
-  for(const angle of angles){
-    const oriented=await makeCanvas(file,"full",angle);
-
-    for(let zi=0;zi<zones.length;zi++){
-      setStatus(`日付を精密OCR中… ${angle}° ${zi+1}/${zones.length}`);
-      const z=zones[zi];
-      const part=cropCanvas(oriented,z[0],z[1],z[2],z[3], zi===3 ? 1 : 1.6);
-
-      await w.setParameters({
-        tessedit_char_whitelist:"",
-        tessedit_pageseg_mode: zi===3 ? Tesseract.PSM.AUTO : Tesseract.PSM.SPARSE_TEXT,
-        preserve_interword_spaces:"1"
-      });
-
-      const r=await w.recognize(part,{rotateAuto:false});
-      const raw=r.data.text||"";
-      const date=parseDate(raw);
-      if(date){
-        await restoreTextOCR();
-        return {date,angle,text:raw};
-      }
-    }
+  // v43 single-pass fallback for red receipt stamps.
+  try{
+    await restoreTextOCR();
+    const w=await ensureWorker();
+    const base=await makeMedicalHiResCanvas(file);
+    const area=cropCanvas(base,0.00,0.00,1.00,0.60,1.4);
+    const red=await makeRedDateCanvas(area);
+    await w.setParameters({
+      tessedit_char_whitelist:"0123456789./-年月日令和",
+      tessedit_pageseg_mode:Tesseract.PSM.SPARSE_TEXT,
+      preserve_interword_spaces:"1"
+    });
+    const r=await w.recognize(red,{rotateAuto:false});
+    await restoreTextOCR();
+    const raw=r.data.text||"";
+    const date=medicalReceiptDateFromLabels(raw)||reiwaStampDateFromText(raw)||"";
+    return date?{date,angle:0,text:raw}:null;
+  }catch(e){
+    try{await restoreTextOCR()}catch(_){ }
+    return null;
   }
-
-  await restoreTextOCR();
-  return null;
 }
 
 function safeShoppingStoreName(text){
@@ -2517,9 +2566,11 @@ $("ocrBtn").onclick=async()=>{
     const full=await makeCanvas(currentFile,"full",0);
     let combined=await recognize(full,true);
 
-    setStatus("金額・負担額欄を通常OCR中…");
-    const right=await makeCanvas(currentFile,"right",0);
-    combined += "\n--- 右側金額欄 ---\n"+await recognize(right,false);
+    if(currentTab!=="medical"){
+      setStatus("金額欄を通常OCR中…");
+      const right=await makeCanvas(currentFile,"right",0);
+      combined += "\n--- 右側金額欄 ---\n"+await recognize(right,false);
+    }
 
     if(currentTab==="medical"){
       // Generic medical-document pass first. This works across different receipt layouts.
@@ -2961,12 +3012,21 @@ TEL 025-000-0000
   const ok50=medicalAmountFromLabels(splitPointOnly)===null;
   const sameLinePoint=`領収金額 315点`;
   const ok51=medicalAmountFromLabels(sameLinePoint)===null;
+  const splitMoney=`請求書兼領収証
+領収金額
+920`;
+  const ok52=medicalAmountFromLabels(splitMoney)?.n===920;
+  const splitPoint=`請求書兼領収証
+領収金額
+315
+診療報酬点数`;
+  const ok53=medicalAmountFromLabels(splitPoint)===null;
 
   currentTab=oldTab;
 
-  const ok=ok1&&ok2&&ok3&&ok4&&ok5&&ok6&&ok7&&ok8&&ok9&&ok10&&ok11&&ok12&&ok13&&ok14&&ok15&&ok16&&ok17&&ok18&&ok19&&ok20&&ok21&&ok22&&ok23&&ok24&&ok25&&ok26&&ok27&&ok28&&ok29&&ok30&&ok31&&ok32&&ok33&&ok34&&ok35&&ok36&&ok37&&ok38&&ok39&&ok40&&ok41&&ok42&&ok43&&ok44&&ok45&&ok46&&ok47&&ok48&&ok49&&ok50&&ok51;
+  const ok=ok1&&ok2&&ok3&&ok4&&ok5&&ok6&&ok7&&ok8&&ok9&&ok10&&ok11&&ok12&&ok13&&ok14&&ok15&&ok16&&ok17&&ok18&&ok19&&ok20&&ok21&&ok22&&ok23&&ok24&&ok25&&ok26&&ok27&&ok28&&ok29&&ok30&&ok31&&ok32&&ok33&&ok34&&ok35&&ok36&&ok37&&ok38&&ok39&&ok40&&ok41&&ok42&&ok43&&ok44&&ok45&&ok46&&ok47&&ok48&&ok49&&ok50&&ok51&&ok52&&ok53;
   const el=$("selftest");
-  el.textContent=ok?"内部抽出テスト：OK（点数→円の誤認識防止）":"内部抽出テスト：要修正";
+  el.textContent=ok?"内部抽出テスト：OK（高速化・点数誤認識防止）":"内部抽出テスト：要修正";
   if(!ok)el.style.background="#ffecec";
   return ok;
 }
